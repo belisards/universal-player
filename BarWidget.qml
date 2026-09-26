@@ -17,10 +17,35 @@ BarWidget {
   property int reportedVolume: 70
   property int pendingVolume: -1
   property string playerTitle: ""
+  property string playerStationUuid: ""
+  property string identifiedTrack: ""
+  property string identifiedStationUuid: ""
   property bool statusReady: false
   property bool playerStateReady: false
   readonly property string playerPath: Qt.resolvedUrl("radio-player").toString().replace(/^file:\/\//, "")
   readonly property string statusPath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-radio-atlas/status.json"
+  readonly property string identifyResultPath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-radio-atlas/identify.json"
+  readonly property string currentIdentifiedTrack:
+    identifiedStationUuid && identifiedStationUuid === playerStationUuid ? identifiedTrack : ""
+
+  function applyIdentifyState(raw) {
+    try {
+      if (typeof raw !== "string" || raw.length > 65536) return
+      var result = JSON.parse(raw || "{}")
+      identifyExpiry.stop()
+      root.identifiedTrack = ""
+      if (result.state !== "done" || !result.title) return
+      var remaining = Number(result.at || 0) * 1000 + 300000 - Date.now()
+      if (remaining <= 0) return
+      root.identifiedStationUuid = String(result.stationUuid || "")
+      root.identifiedTrack = root.singleLineText(
+        String(result.title) + (result.artist ? " — " + result.artist : ""), 160)
+      identifyExpiry.interval = remaining
+      identifyExpiry.start()
+    } catch (error) {
+      return
+    }
+  }
 
   function singleLineText(value, limit) {
     return String(value || "").replace(/[\r\n\t]+/g, " ").slice(0, limit)
@@ -42,6 +67,7 @@ BarWidget {
       root.reportedVolume = isFinite(nextVolume)
         ? Math.max(0, Math.min(100, nextVolume)) : 70
       if (root.pendingVolume < 0) root.playerVolume = root.reportedVolume
+      root.playerStationUuid = String((state.station && state.station.uuid) || "")
       root.playerTitle = root.singleLineText(
         state.title || (state.station && state.station.name) || "", 160)
       root.playerStateReady = true
@@ -80,6 +106,20 @@ BarWidget {
     printErrors: false
     onLoaded: root.applyPlayerState(text())
     onFileChanged: reload()
+  }
+
+  FileView {
+    path: root.statusReady ? root.identifyResultPath : ""
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.applyIdentifyState(text())
+    onFileChanged: reload()
+  }
+
+  Timer {
+    id: identifyExpiry
+    onTriggered: root.identifiedTrack = ""
   }
 
   Process {
@@ -138,6 +178,7 @@ BarWidget {
     tooltipText: root.playerRunning
       ? (root.streamError ? root.streamError + ": " : root.playerPaused ? "Radio paused: " : "Playing: ")
         + root.safeTooltipText(root.playerTitle)
+        + (root.currentIdentifiedTrack ? "  ·  ♪ " + root.safeTooltipText(root.currentIdentifiedTrack) : "")
         + "  ·  " + (root.playerMuted ? "muted" : root.playerVolume + "%")
       : "Open Radio Atlas"
 

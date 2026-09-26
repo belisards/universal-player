@@ -27,7 +27,7 @@ jq -e '
 
 bash -n "$project_dir/radio-fetch" "$project_dir/radio-player" \
   "$project_dir/radio-sandbox" "$project_dir/radio-session" "$project_dir/radio-state" \
-  "$project_dir/radio-window" \
+  "$project_dir/radio-window" "$project_dir/radio-identify" \
   "$project_dir/tests/fixtures/"*
 luac -p "$project_dir/radio-status.lua"
 node "$project_dir/tests/model.test.mjs"

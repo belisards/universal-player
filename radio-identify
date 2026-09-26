@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+: "${XDG_RUNTIME_DIR:?Radio Atlas requires XDG_RUNTIME_DIR}"
+runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
+socket="$runtime_dir/mpv.sock"
+result_file="$runtime_dir/identify.json"
+sample="$runtime_dir/identify-sample.mkv"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+player_path="$script_dir/radio-player"
+sample_seconds=${RADIO_ATLAS_IDENTIFY_SECONDS:-12}
+notify=true
+[[ ${1:-} == --quiet ]] && notify=false
+
+install -d -m 700 "$runtime_dir"
+exec 9>"$runtime_dir/identify.lock"
+if ! flock -n 9; then
+  echo 'Already listening' >&2
+  exit 5
+fi
+
+station='{}'
+write_result() {
+  local state=$1 title=${2:-} artist=${3:-} message=${4:-}
+  local temporary
+  temporary=$(mktemp "$runtime_dir/identify.XXXXXX")
+  jq -cn --arg state "$state" --arg title "${title:0:200}" --arg artist "${artist:0:200}" \
+    --arg message "${message:0:200}" --argjson station "$station" --argjson at "$(date +%s)" \
+    '{state:$state,title:$title,artist:$artist,message:$message,
+      stationUuid:($station.uuid // ""),stationName:($station.name // ""),at:$at}' > "$temporary"
+  mv "$temporary" "$result_file"
+  cat "$result_file"
+}
+
+notify() {
+  $notify || return 0
+  notify-send -a 'Radio Atlas' -i audio-x-generic "$1" "${2:-}" 2>/dev/null || true
+}
+
+ipc() {
+  printf '%s\n' "$1" | socat -T 1 - "UNIX-CONNECT:$socket" 2>/dev/null \
+    | jq -e 'select(.error == "success")' >/dev/null 2>&1
+}
+
+fail() {
+  write_result "$1" '' '' "$2"
+  notify 'Song not identified' "$2"
+  exit "${3:-4}"
+}
+
+command -v songrec >/dev/null || fail error 'songrec is not installed' 3
+
+status=$("$player_path" status 2>/dev/null) || status='{}'
+station=$(jq -c '.station // {}' <<< "$status")
+jq -e '.running == true and .paused != true' <<< "$status" >/dev/null \
+  || fail error 'Radio is not playing' 2
+
+write_result listening >/dev/null
+
+stop_recording() { ipc '{"command":["set_property","stream-record",""]}' || true; }
+trap 'stop_recording; rm -f "$sample"' EXIT
+rm -f "$sample"
+recording=$(jq -cn --arg path "$sample" '{command:["set_property","stream-record",$path]}')
+ipc "$recording" || fail error 'Could not capture the stream'
+sleep "$sample_seconds"
+stop_recording
+
+[[ -s $sample ]] || fail error 'No audio was captured'
+
+response=$(timeout 45 songrec recognize --json "$sample" 2>/dev/null) || response=''
+title=$(jq -r '.track.title // empty' <<< "$response" 2>/dev/null | head -n 1 | tr -d '\r\n\t') || title=''
+artist=$(jq -r '.track.subtitle // empty' <<< "$response" 2>/dev/null | head -n 1 | tr -d '\r\n\t') || artist=''
+
+[[ -n $title ]] || fail none 'No match — try again during music' 0
+
+write_result done "$title" "$artist"
+notify "$title" "$artist"

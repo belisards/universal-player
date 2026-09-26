@@ -48,6 +48,13 @@ Item {
   property int reportedVolume: 70
   property int pendingVolume: -1
   property string playerTitle: ""
+  property string identifyState: ""
+  property string identifyText: ""
+  property string identifyStationUuid: ""
+  readonly property bool identifying: identifyProcess.running || identifyState === "listening"
+  readonly property string identifiedTrack: identifyStationUuid === playingStationUuid
+    && (identifyState === "done" || identifyState === "none" || identifyState === "error")
+    ? identifyText : ""
   property string playerOutput: ""
   property var audioOutputs: []
   property string outputsError: ""
@@ -83,6 +90,8 @@ Item {
   readonly property string statePath: Qt.resolvedUrl("radio-state").toString().replace(/^file:\/\//, "")
   readonly property string runtimePath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-radio-atlas"
   readonly property string statusPath: runtimePath + "/status.json"
+  readonly property string identifyPath: Qt.resolvedUrl("radio-identify").toString().replace(/^file:\/\//, "")
+  readonly property string identifyResultPath: runtimePath + "/identify.json"
   readonly property string playSelectionPath: runtimePath + "/play-selection.json"
   readonly property string favoriteSelectionPath: runtimePath + "/favorite-selection.json"
 
@@ -98,6 +107,39 @@ Item {
     var station = playingStationName.toLowerCase()
     return title && station && title.toLowerCase() !== station ? title : ""
   }
+  readonly property string trackLine: playingTrackTitle
+    || (identifying ? "Listening for the song…" : identifiedTrack)
+
+  function applyIdentifyState(raw) {
+    try {
+      if (typeof raw !== "string" || raw.length > 65536) return
+      var result = JSON.parse(raw || "{}")
+      identifyState = String(result.state || "")
+      identifyStationUuid = String(result.stationUuid || "")
+      var text = result.state === "done"
+        ? String(result.title || "") + (result.artist ? " — " + result.artist : "")
+        : String(result.message || "")
+      identifyText = text.replace(/[\r\n\t]+/g, " ").slice(0, 200)
+      var ttl = result.state === "done" ? 300000 : result.state === "listening" ? 60000 : 20000
+      var remaining = Number(result.at || 0) * 1000 + ttl - Date.now()
+      identifyExpiry.stop()
+      if (remaining <= 0) identifyState = ""
+      else {
+        identifyExpiry.interval = remaining
+        identifyExpiry.start()
+      }
+    } catch (error) {
+      return
+    }
+  }
+
+  function identifySong() {
+    if (!playerRunning || playerPaused || identifying) return
+    identifyState = "listening"
+    identifyStationUuid = playingStationUuid
+    identifyProcess.running = true
+  }
+
   readonly property bool remoteMode: mode !== "favorites" && mode !== "recent"
   readonly property bool lightTheme:
     0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b > 0.5
@@ -137,6 +179,7 @@ Item {
         { input: "SPACE", action: "Play or pause" },
         { input: "R", action: "Tune randomly" },
         { input: "F", action: "Favorite selected station" },
+        { input: "I", action: "Identify playing song" },
         { input: "M", action: "Mute or unmute" },
         { input: "+ / -", action: "Change volume" },
         { input: "ESC", action: "Back, clear, or close" },
@@ -773,6 +816,25 @@ Item {
   }
 
   FileView {
+    path: root.statusReady ? root.identifyResultPath : ""
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.applyIdentifyState(text())
+    onFileChanged: reload()
+  }
+
+  Process {
+    id: identifyProcess
+    command: [root.identifyPath]
+  }
+
+  Timer {
+    id: identifyExpiry
+    onTriggered: root.identifyState = ""
+  }
+
+  FileView {
     id: playSelectionFile
     path: root.playSelectionPath
     preload: false
@@ -1286,6 +1348,9 @@ Item {
         } else if (event.key === Qt.Key_M) {
           root.playerAction("mute")
           event.accepted = true
+        } else if (event.key === Qt.Key_I) {
+          root.identifySong()
+          event.accepted = true
         } else if (event.key === Qt.Key_F && root.selectedStation) {
           root.toggleFavorite(root.selectedStation.uuid)
           event.accepted = true
@@ -1707,7 +1772,7 @@ Item {
               id: nowPlaying
               anchors.left: parent.left
               anchors.leftMargin: Style.spacing.md
-              anchors.right: playingFavoriteButton.left
+              anchors.right: identifyButton.left
               anchors.rightMargin: Style.spacing.xs
               anchors.top: parent.top
               anchors.topMargin: Style.spacing.md
@@ -1731,7 +1796,7 @@ Item {
                 ? root.playerError
                 : root.streamError ? root.streamError + ". Play to retry, or Next."
                 : (!root.playerRunning ? "Choose a signal to begin"
-                : (root.playingTrackTitle ? root.playingTrackTitle + "  ·  " : "")
+                : (root.trackLine ? root.trackLine + "  ·  " : "")
                   + (root.playerPaused ? "Paused" : "Live")
                   + (root.playlistCount > 1 ? "  ·  " + root.playlistCount + " stations queued" : ""))
               textFormat: Text.PlainText
@@ -1739,6 +1804,22 @@ Item {
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
+            }
+
+            Button {
+              id: identifyButton
+              anchors.right: playingFavoriteButton.left
+              anchors.top: playingFavoriteButton.top
+              visible: root.playerRunning && root.playingStationUuid !== ""
+              iconText: root.identifying ? "\uf130" : "\uf001"
+              tooltipText: root.identifying ? "Listening…" : "Identify the playing song"
+              enabled: !root.identifying && !root.playerPaused
+              focusable: true
+              foreground: root.identifying ? root.accent : root.foreground
+              accent: root.accent
+              Accessible.role: Accessible.Button
+              Accessible.name: tooltipText
+              onClicked: root.identifySong()
             }
 
             Button {

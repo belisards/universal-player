@@ -17,6 +17,7 @@ usual play, pause, previous, and next controls.
 - Country-level map estimates when a station has no published coordinates
 - Automatic country focus for the station that is actually playing
 - Current station identity, track metadata, and one-click favoriting in the player
+- Song identification for stations without track metadata: the music-note button (or `I`) samples ~12s of the stream and asks Shazam via [`songrec`](https://github.com/marin-m/SongRec); the result shows in the player, the bar tooltip, and a notification
 - Instant cached results while full-directory search and country browsing refresh from Radio Browser
 - Random tuning that avoids recent stations, plus favorites and listening history
 - Independent volume slider, mute, and bar-wheel volume control
@@ -65,6 +66,7 @@ Favorites, listening history, volume, and the selected audio output remain in
 | Space | Play or pause |
 | `R` | Tune a random station |
 | `F` | Favorite selected station |
+| `I` | Identify the playing song (needs `songrec`) |
 | `+` / `-` | Raise or lower radio volume |
 | `M` | Mute or unmute |
 | Speaker icon | Choose the audio output |
