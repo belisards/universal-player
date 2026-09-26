@@ -1,5 +1,7 @@
 # Radio Atlas
 
+> Fork of [AksharP5/omarchy-radio-atlas](https://github.com/AksharP5/omarchy-radio-atlas) that adds song identification via `songrec` for stations that send no track metadata.
+
 Explore live radio on a rotatable globe from the Omarchy bar. Click a station
 signal to play it, or click a country to browse its stations. Playback runs in
 Omarchy's existing `mpv` and `mpv-mpris` setup, so `omarchy.media` provides the
@@ -31,7 +33,7 @@ usual play, pause, previous, and next controls.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/AksharP5/omarchy-radio-atlas.git --enable
+omarchy plugin add https://github.com/belisards/omarchy-radio-atlas.git --enable
 ```
 
 Radio Atlas uses `bubblewrap`, `curl`, `iproute2`, `jq`, `mpv`, `python`,
