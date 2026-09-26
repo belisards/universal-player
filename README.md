@@ -1,53 +1,66 @@
-# Tocador
+# Universal Player
 
-> A connector-based Omarchy music player, evolved from
+> One Omarchy media player for world radio, embedded IPTV, YouTube, independent music archives,
+> and your own albums. Forked from
 > [AksharP5/omarchy-radio-atlas](https://github.com/AksharP5/omarchy-radio-atlas).
 
-Explore live radio on a rotatable globe, then switch to an animated album world
-without switching players. Tocador connects Radio Browser, its aggregated
-[UQT and Hominis Canidae archives](https://tocador.cc/), and local or synced music folders such as
-Nextcloud. Playback stays in one `mpv` queue and remains available through
-Omarchy's media controls.
+Universal Player started as Radio Atlas, a live-radio globe, and grew into a
+connector-based player. Four tabs share one window, one search box, one Random
+button, and one `mpv` queue that shows up in Omarchy's media controls:
 
-Tocador is an [Omarchy](https://omarchy.org) shell plugin: it builds on Omarchy's
+- **Radio**: about 50,000 stations from Radio Browser on a rotatable globe
+- **IPTV**: about 10,000 free channels from iptv-org, rendered inside the globe canvas
+- **YouTube**: live channels from your subscriptions, kept separate from IPTV
+- **Tocador**: the [UQT and Hominis Canidae](https://tocador.cc/) archives as one album catalog
+- **My Music**: any local or synced music folder, such as a Nextcloud library
+
+Universal Player is an [Omarchy](https://omarchy.org) shell plugin: it builds on Omarchy's
 Quickshell UI components, so it needs Omarchy and won't run on a plain Hyprland setup.
 
-[View Tocador on the Omarchy Plugin Marketplace](https://omarchyplugins.com/plugin.html?id=akshar.radio-atlas)
+![Universal Player showing live TV channels across the globe](preview.png)
 
-![Tocador showing live stations across the globe](preview.png)
+## What Universal Player adds
 
-## Features
+- **IPTV on the globe.** iptv-org channels are placed by country and play directly inside
+  the main globe canvas with the same transport controls as radio.
+- **Live YouTube subscriptions.** A separate opt-in source lists channels you follow while
+  they are broadcasting. Playback goes through `yt-dlp` in the sandbox and never sees your cookies.
+- **Tocador archives.** UQT and Hominis Canidae are aggregated into one catalog of albums
+  and tracks, cached for a week.
+- **Music-folder connectors.** Point Universal Player at any folder: it indexes albums, finds
+  sidecar, media-art, and embedded covers, and never uploads your library.
+- **Album world.** An animated, theme-aware cover wall with album queues that advance to
+  the next track automatically.
+- **Universal search.** One search box covers Radio, IPTV, YouTube, Tocador, and My Music, with a
+  source label on every result.
+- **Random, everywhere.** The Random button (or `R`) plays a random station, channel, or
+  album depending on the tab, and skips what you just heard.
+- **Song identification.** For stations without track metadata, the music-note button (or `I`)
+  samples about 12 seconds and asks Shazam through [`songrec`](https://github.com/marin-m/SongRec).
+  The result appears in the player, the bar tooltip, and a notification.
+- **One control surface.** Radio, music, embedded IPTV, and YouTube share the Tocador
+  transport controls; IPTV stays inside the main window.
+
+## Inherited from Radio Atlas
 
 - Kinetic drag rotation that highlights a nearby station when it settles, plus deep wheel zoom on a theme-aware globe
 - A fast cached world view that progressively adds thousands of stations and keeps the session catalog when closed
-- Country stations stay on the session globe and take priority over background signals
-- Country-level map estimates when a station has no published coordinates
+- Country browsing, with country-level map estimates for stations without coordinates
 - Automatic country focus for the station that is actually playing
-- Current station identity, track metadata, and one-click favoriting in the player
-- Song identification for stations without track metadata: the music-note button (or `I`) samples ~12s of the stream and asks Shazam via [`songrec`](https://github.com/marin-m/SongRec); the result shows in the player, the bar tooltip, and a notification
-- Instant cached results while full-directory search and country browsing refresh from Radio Browser
-- A first-class **Albums** mode with an animated, theme-aware cover wall and album-specific queues
-- Live TV: about 10,000 free channels from [iptv-org](https://github.com/iptv-org/iptv) on the same globe, playing video in a floating mpv window
-- Three source choices: global live radio, one Tocador connector aggregating UQT + Hominis, and configurable music folders
-- Universal search across Radio, Tocador, and My Music, with visible source labels
-- Local and Nextcloud-synced libraries are indexed from user configuration rather than hard-coded paths
-- One player for stations and tracks, with automatic advance at the end of album tracks
-- Random tuning that avoids recent stations, plus favorites and listening history
+- Favorites and listening history
 - Independent volume slider, mute, and bar-wheel volume control
-- Audio output picker that routes radio to any PipeWire sink, including AirPlay speakers exposed as RAOP sinks
-- Centered, floating window with normal Omarchy window-manager behavior
-- Automatic dismissal when Omarchy starts its screensaver
-- Keyboard navigation
-- Persistent world and country caches with background refresh and transient retries
-- Keeps your chosen station selected if its stream fails, with explicit retry or next controls
+- Audio output picker for any PipeWire sink, including AirPlay speakers exposed as RAOP sinks
+- A sandboxed player behind a bounded proxy that refuses private network destinations
+- Centered floating window, keyboard navigation, and dismissal when the screensaver starts
+- Keeps a failed station selected, with explicit retry or next controls
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/belisards/tocador-widget.git --enable
+omarchy plugin add https://github.com/belisards/universal-player.git --enable
 ```
 
-Tocador uses `bubblewrap`, `curl`, `ffmpeg`, `ffprobe`, `iproute2`, `jq`, `mpv`, `python`,
+Universal Player uses `bubblewrap`, `curl`, `ffmpeg`, `ffprobe`, `iproute2`, `jq`, `mpv`, `python`,
 `socat`, `coreutils`, and `util-linux`. These packages ship with Omarchy.
 `mpv-mpris` connects playback to `omarchy.media` and is also part of the
 standard Omarchy installation.
@@ -65,9 +78,9 @@ Favorites, listening history, volume, and the selected audio output remain in
 `~/.local/share/radio-atlas/state.json` so reinstalling restores them. Remove
 `~/.local/share/radio-atlas/` manually if you also want to delete that data.
 
-## Live TV
+## IPTV and YouTube
 
-The **TV** tab (or `T`) swaps the globe to live TV channels from the
+The **IPTV** tab (or `T`) swaps the globe to live channels from the
 community-maintained [iptv-org](https://github.com/iptv-org/api) catalog.
 The catalog is downloaded once a day (about 11 MB) to
 `~/.cache/omarchy-radio-atlas/tv.json`; searching and browsing a country read
@@ -75,15 +88,14 @@ that cache locally. Adult, closed, and legally blocklisted channels are
 excluded, and each channel keeps its most reliable stream. Channels only
 publish a country, so their signals sit on country estimates.
 
-TV uses the same behind-the-scenes `mpv` player, queue, sandbox, and Tocador
-transport controls as audio. Video is enabled only for TV entries and opens in
-a centered 960×540 floating surface with the `radio-atlas-tv` class; closing
-that surface stops playback.
+IPTV uses QtMultimedia to render directly inside the main globe canvas. The
+sidebar, queue, volume, pause, previous, next, and stop controls stay in the
+same window; IPTV does not open a second video window.
 
 ### Live YouTube subscriptions
 
-Channels you subscribe to on YouTube appear at the top of the TV list while
-they are broadcasting live. Enable the `youtube-subscriptions` connector in
+Channels you subscribe to on YouTube appear in their own **YouTube** source
+while they are broadcasting live. Enable the `youtube-subscriptions` connector in
 `~/.config/radio-atlas/connectors.json` and point `auth` at a browser-headers
 file from a YouTube Music login, such as the `auth.json` that
 [ytmusicapi](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html)
@@ -94,7 +106,7 @@ produces:
   "auth": "~/.config/yt-music/auth.json", "enabled": true }
 ```
 
-Tocador reads that session only to fetch your signed-in YouTube sidebar,
+Universal Player reads that session only to fetch your signed-in YouTube sidebar,
 which flags subscriptions that are live, and caches the result for three
 minutes in `~/.cache/omarchy-radio-atlas/youtube-live.json` without any
 credentials. Playback opens the channel's public `/live` page through `yt-dlp`
@@ -102,8 +114,9 @@ inside the sandbox and never receives your cookies. The sidebar covers the
 subscriptions YouTube ranks as most relevant, not necessarily all of them,
 and live channels have no country, so they are listed but not placed on the
 globe. This needs `yt-dlp` with a JavaScript runtime such as `deno`. Many free streams are geo-blocked or
-offline at any moment; when one fails, press Next. Open TV directly with
-`omarchy-shell shell toggle akshar.radio-atlas '{"action":"tv"}'`.
+offline at any moment; when one fails, press Next. Open IPTV directly with
+`omarchy-shell shell toggle akshar.radio-atlas '{"action":"iptv"}'` or YouTube with
+`omarchy-shell shell toggle akshar.radio-atlas '{"action":"youtube"}'`.
 
 ## Music-folder connectors
 
@@ -130,9 +143,9 @@ only; never commit `connectors.json`, which may reveal private usernames and pat
 }
 ```
 
-Tocador scans common audio formats, reads one representative file per
+Universal Player scans common audio formats, reads one representative file per
 album for metadata, discovers sidecar, media-art, and embedded covers, and caches the
-result for an hour. Use the refresh button in Albums to rebuild the index.
+result for an hour. Use the refresh button on the album wall to rebuild the index.
 `RADIO_ATLAS_MUSIC_DIRS=/path/one:/path/two` is available as a temporary
 override. Local playback is restricted to enabled folder roots.
 
@@ -148,8 +161,8 @@ override. Local playback is restricted to enabled folder roots.
 | Up / Down | Move through stations |
 | Enter | Play selected station |
 | Space | Play or pause |
-| `R` | Tune a random station, or refresh the active album connector |
-| `T` | Switch between radio and TV |
+| `R` | Play a random station, channel, or album from the current tab |
+| `T` | Cycle Radio, IPTV, and YouTube |
 | `F` | Favorite selected station |
 | `I` | Identify the playing song (needs `songrec`) |
 | `+` / `-` | Raise or lower radio volume |
@@ -158,19 +171,19 @@ override. Local playback is restricted to enabled folder roots.
 | `?` | Show or hide controls |
 | Escape | Hide controls, clear search, or close |
 
-Open Tocador's aggregated UQT + Hominis view directly with
+Open the Tocador archives (UQT + Hominis) directly with
 `omarchy-shell shell toggle akshar.radio-atlas '{"action":"tocador"}'`, open local albums with
 `omarchy-shell shell toggle akshar.radio-atlas '{"action":"albums","source":"library"}'`,
-or start Tocador headless with
+or play them headless with
 `radio-player tocador`. Archive catalogs are cached for a week in
 `~/.cache/radio-atlas/`.
 
-On the bar, left click opens Tocador, middle click tunes randomly, right
+On the bar, left click opens Universal Player, middle click tunes a random station, right
 click stops its player or resumes the most recently played station when stopped,
 and the mouse wheel adjusts radio volume. If there is no listening history,
 right click does nothing.
 
-If a station disconnects or cannot be played, Tocador keeps it selected and
+If a station disconnects or cannot be played, Universal Player keeps it selected and
 shows the failure. Click the play button to retry that station, or Next/Previous
 to choose another queued station. It does not automatically reconnect or switch
 stations. A repeated opening clip can come from the station's stream server;
@@ -183,7 +196,7 @@ same station preserve the landing highlight without repainting the globe.
 Track-title, volume, and pause updates also preserve your station-list selection.
 Theme colors update the globe immediately. Background station expansion stops
 after three consecutive attempts add no stations, including failed requests;
-reopening Tocador allows expansion to try again.
+reopening Universal Player allows expansion to try again.
 
 ## Audio outputs and AirPlay
 
@@ -227,25 +240,25 @@ refuses the stream simply stays silent; pick another output to recover.
 ## Data and privacy
 
 Station data comes from the community-run
-[Radio Browser](https://www.radio-browser.info/). Tocador sends its name
+[Radio Browser](https://www.radio-browser.info/). Universal Player sends its name
 and version as the HTTP user agent. Starting a station calls Radio Browser's
 click-count endpoint. Favorites and history stay in
 `~/.local/share/radio-atlas/state.json`.
 
-TV channel data comes from iptv-org's public API on GitHub Pages; no playback
+IPTV channel data comes from iptv-org's public API on GitHub Pages; no playback
 or search data is sent back to it. Station metadata and stream URLs are community supplied. Labels are rendered
 as plain text. Playback runs in an isolated network namespace and reaches
 stations through a bounded proxy that rejects private and effectively local
 destinations, including after redirects. Remote metadata and local JSON are
-size- and record-limited before they reach the shell. Tocador still connects
+size- and record-limited before they reach the shell. Universal Player still connects
 directly to third-party stations; HTTP streams are unencrypted. Only play
 stations you trust.
 
 Map geometry comes from public-domain Natural Earth data.
 
 Folder connector metadata and cover paths remain local. The index is cached at
-`~/.cache/radio-atlas/library.json`; Tocador does not upload a local
-library or send it to Radio Browser or Tocador.
+`~/.cache/radio-atlas/library.json`; Universal Player does not upload a local
+library or send it to Radio Browser or tocador.cc.
 
 ## Roadmap
 
@@ -254,7 +267,7 @@ library or send it to Radio Browser or Tocador.
 - Connector settings UI, per-connector health, and search capabilities
 - Optional Jellyfin connector
 
-These are intentionally roadmap items. Tocador does not scrape commercial
+These are intentionally roadmap items. Universal Player does not scrape commercial
 music services or mix anonymous open-catalog discovery into a personal library.
 
 ## Troubleshooting
@@ -267,7 +280,7 @@ capped at 200 lines per player session. Stopping and starting playback begins
 a new session and replaces those logs. A connection closing is not necessarily
 an error; it also happens when changing stations or stopping playback.
 
-If saved state is malformed, oversized, or contains too many entries, Tocador
+If saved state is malformed, oversized, or contains too many entries, Universal Player
 refuses to overwrite it and reports
 `~/.local/share/radio-atlas/state.json`; back up that file before repairing or
 removing it.

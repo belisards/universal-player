@@ -178,7 +178,7 @@ assert_no_match 'resizewindowpixel|centerwindow|hl\.dsp\.window\.(float|resize|c
   "$project_dir/RadioAtlas.qml"
 rg -Fq 'hl.window_rule({' "$project_dir/radio-window"
 rg -Fq 'initial_class = "^org[.]quickshell$"' "$project_dir/radio-window"
-rg -Fq 'initial_title = "^Tocador$"' "$project_dir/radio-window"
+rg -Fq 'initial_title = "^Universal Player$"' "$project_dir/radio-window"
 rg -Fq 'float = true' "$project_dir/radio-window"
 rg -Fq 'center = true' "$project_dir/radio-window"
 rg -Fq 'size = { $width, $height }' "$project_dir/radio-window"

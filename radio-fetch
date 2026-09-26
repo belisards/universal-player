@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-: "${XDG_RUNTIME_DIR:?Tocador requires XDG_RUNTIME_DIR}"
+: "${XDG_RUNTIME_DIR:?Universal Player requires XDG_RUNTIME_DIR}"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 cache_root=${XDG_CACHE_HOME:-$HOME/.cache}
 cache_dir="$cache_root/omarchy-radio-atlas"
@@ -15,7 +15,7 @@ results_file="$runtime_dir/results.json"
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 state_path="$script_dir/radio-state"
 version=$(jq -r '.version' "$script_dir/manifest.json")
-user_agent="Tocador/$version (https://github.com/belisards/tocador-widget)"
+user_agent="UniversalPlayer/$version (https://github.com/belisards/universal-player)"
 max_response_bytes=4194304
 world_cache_minutes=1440
 country_cache_minutes=1440

@@ -182,7 +182,7 @@ BarWidget {
         + root.safeTooltipText(root.playerTitle)
         + (root.currentIdentifiedTrack ? "  ·  ♪ " + root.safeTooltipText(root.currentIdentifiedTrack) : "")
         + "  ·  " + (root.playerMuted ? "muted" : root.playerVolume + "%")
-      : "Open Tocador"
+      : "Open Universal Player"
 
     onPressed: function(mouseButton) {
       if (!root.bar) return

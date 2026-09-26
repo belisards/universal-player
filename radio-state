@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-: "${XDG_RUNTIME_DIR:?Tocador requires XDG_RUNTIME_DIR}"
+: "${XDG_RUNTIME_DIR:?Universal Player requires XDG_RUNTIME_DIR}"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 data_root=${XDG_DATA_HOME:-$HOME/.local/share}
 state_dir="$data_root/radio-atlas"
@@ -41,7 +41,7 @@ ensure_state() {
     return
   fi
   valid_state_file "$state_file" && return
-  echo "Tocador saved state is invalid; refusing to overwrite $state_file" >&2
+  echo "Universal Player saved state is invalid; refusing to overwrite $state_file" >&2
   exit 4
 }
 
@@ -86,7 +86,7 @@ write_state() {
   jq -c --argjson station "$station" "$filter" "$state_file" > "$temporary"
   if ! valid_state_file "$temporary"; then
     rm -f "$temporary"
-    echo 'Tocador could not save this station safely' >&2
+    echo 'Universal Player could not save this station safely' >&2
     return 4
   fi
   mv "$temporary" "$state_file"
@@ -99,7 +99,7 @@ write_volume() {
   jq -c --argjson volume "$volume" '.volume = $volume' "$state_file" > "$temporary"
   if ! valid_state_file "$temporary"; then
     rm -f "$temporary"
-    echo 'Tocador could not save the volume safely' >&2
+    echo 'Universal Player could not save the volume safely' >&2
     return 4
   fi
   mv "$temporary" "$state_file"
@@ -112,7 +112,7 @@ write_output() {
   jq -c --arg output "$output" '.output = $output' "$state_file" > "$temporary"
   if ! valid_state_file "$temporary"; then
     rm -f "$temporary"
-    echo 'Tocador could not save the audio output safely' >&2
+    echo 'Universal Player could not save the audio output safely' >&2
     return 4
   fi
   mv "$temporary" "$state_file"

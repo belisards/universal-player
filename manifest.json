@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "id": "akshar.radio-atlas",
-  "name": "Tocador",
+  "name": "Universal Player",
   "version": "0.2.0",
   "author": "belisards and Akshar Patel",
   "license": "MIT",
   "description": "Play world radio, live TV, Tocador archives, and your own albums in one integrated Omarchy media player.",
-  "homepage": "https://github.com/belisards/tocador-widget",
-  "repository": "https://github.com/belisards/tocador-widget",
+  "homepage": "https://github.com/belisards/universal-player",
+  "repository": "https://github.com/belisards/universal-player",
   "keywords": [
     "radio",
     "world",
@@ -30,7 +30,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Tocador",
+    "displayName": "Universal Player",
     "description": "Open radio, TV, albums, and connected music folders",
     "category": "Media",
     "allowMultiple": false,

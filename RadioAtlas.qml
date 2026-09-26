@@ -1448,7 +1448,7 @@ Item {
   FloatingWindow {
     id: panel
     visible: false
-    title: "Tocador"
+    title: "Universal Player"
     color: root.background
     implicitWidth: root.preferredWidth
     implicitHeight: root.preferredHeight
@@ -1565,7 +1565,7 @@ Item {
           anchors.left: parent.left
           anchors.leftMargin: Style.spacing.panelPadding
           anchors.verticalCenter: parent.verticalCenter
-          text: "TOCADOR"
+          text: "UNIVERSAL PLAYER"
           textFormat: Text.PlainText
           color: root.foreground
           font.family: Style.font.menuFamily
@@ -2364,7 +2364,7 @@ Item {
         visible: root.helpVisible
         z: 2
         Accessible.role: Accessible.Pane
-        Accessible.name: "Tocador controls"
+        Accessible.name: "Universal Player controls"
 
         Rectangle {
           anchors.fill: parent

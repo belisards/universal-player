@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-: "${XDG_RUNTIME_DIR:?Tocador requires XDG_RUNTIME_DIR}"
+: "${XDG_RUNTIME_DIR:?Universal Player requires XDG_RUNTIME_DIR}"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 data_root=${XDG_DATA_HOME:-$HOME/.local/share}
 state_dir="$data_root/radio-atlas"
@@ -30,7 +30,7 @@ config_root=${XDG_CONFIG_HOME:-$HOME/.config}
 connectors_file="$config_root/radio-atlas/connectors.json"
 status_script="$script_dir/radio-status.lua"
 version=$(jq -r '.version' "$script_dir/manifest.json")
-user_agent="Tocador/$version (https://github.com/belisards/tocador-widget)"
+user_agent="UniversalPlayer/$version (https://github.com/belisards/universal-player)"
 install -d -m 700 "$runtime_dir" "$state_dir"
 exec 8>"$runtime_dir/player.lock"
 
@@ -566,7 +566,7 @@ play_station() {
       --force-window=no
       --wayland-app-id=radio-atlas-tv
       --ytdl-format='bv*[height<=1080]+ba/b[height<=1080]/b'
-      --title='${?media-title:${media-title}}${!media-title:Tocador TV}'
+      --title='${?media-title:${media-title}}${!media-title:Universal Player TV}'
       --audio-display=no
       --idle=yes
       --loop-playlist=inf

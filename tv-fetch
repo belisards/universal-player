@@ -32,7 +32,7 @@ lock_file = cache_dir / "tv.lock"
 youtube_file = cache_dir / "youtube-live.json"
 connectors_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "connectors.json"
 version = json.loads((script_dir / "manifest.json").read_text()).get("version", "0")
-user_agent = f"Radio Atlas/{version} (https://github.com/belisards/tocador-widget)"
+user_agent = f"UniversalPlayer/{version} (https://github.com/belisards/universal-player)"
 
 # Places too small for the 110m globe, placed on their capital instead.
 FALLBACK_COORDINATES = {
