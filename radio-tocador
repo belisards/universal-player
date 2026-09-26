@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Emit playable tracks from the curated Tocador archives."""
+import gzip
+import hashlib
+import io
+import json
+import os
+import random
+import sys
+import tempfile
+import time
+import unicodedata
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+ACERVOS = {
+    "uqt": {
+        "name": "Acervo UQT",
+        "data": "https://rafapolo.github.io/uqt/data/uqt-albums.json.gz",
+        "base_url": "https://cdn.tocador.cc/uqt",
+    },
+    "homi": {
+        "name": "Hominis Canidae",
+        "data": "https://rafapolo.github.io/hominiscanidae/data/homi-albums.json.gz",
+        "base_url": "https://cdn.tocador.cc/indie",
+    },
+}
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "radio-atlas")
+CACHE_TTL = 7 * 86400
+MAX_COMPRESSED_BYTES = 8 * 1024 * 1024
+MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_COVER_BYTES = 3 * 1024 * 1024
+COVER_HEADERS = {"User-Agent": "Mozilla/5.0 Tocador/0.2", "Referer": "https://tocador.cc/"}
+
+
+def decode(db):
+    if db.get("v") != 2:
+        return db
+    a, t = db["a"], db["t"]
+    albums, k = [], 0
+    for i in range(len(a["t"])):
+        title, artist, year, n = a["t"][i], a["r"][i], a["y"][i], a["n"][i]
+        tracks = []
+        for j in range(n):
+            tt, kind = t["t"][k], t["k"][k]
+            if kind == 1:
+                f = f"{j + 1:02d} - {tt}.mp3"
+            elif kind == 2:
+                f = f"{j + 1:02d} {tt}.mp3"
+            else:
+                f = t["f"][k]
+            tracks.append({"title": tt, "file": f, "artists": t["r"][k] or artist})
+            k += 1
+        albums.append({
+            "title": title, "artist": artist, "year": year,
+            "path": a["p"][i] or f"{year} - {artist} - {title}",
+            "has_cover": a["c"][i] == 1, "tracks": tracks,
+        })
+    return {"meta": db.get("meta") or {}, "albums": albums}
+
+
+def read_catalog(response):
+    declared = response.headers.get("Content-Length")
+    if declared and int(declared) > MAX_COMPRESSED_BYTES:
+        raise ValueError("Tocador catalog is too large")
+    compressed = response.read(MAX_COMPRESSED_BYTES + 1)
+    if len(compressed) > MAX_COMPRESSED_BYTES:
+        raise ValueError("Tocador catalog is too large")
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as archive:
+        document = archive.read(MAX_DECOMPRESSED_BYTES + 1)
+    if len(document) > MAX_DECOMPRESSED_BYTES:
+        raise ValueError("Expanded Tocador catalog is too large")
+    return json.loads(document)
+
+
+def load(key):
+    os.makedirs(CACHE, mode=0o700, exist_ok=True)
+    path = os.path.join(CACHE, f"tocador-{key}.json")
+    if not os.path.exists(path) or time.time() - os.path.getmtime(path) > CACHE_TTL:
+        try:
+            req = urllib.request.Request(ACERVOS[key]["data"], headers={"User-Agent": "Tocador"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                db = decode(read_catalog(r))
+            with open(path + ".tmp", "w") as f:
+                json.dump(db, f)
+            os.replace(path + ".tmp", path)
+        except (OSError, ValueError, KeyError, TypeError):
+            if not os.path.exists(path):
+                raise
+    with open(path) as f:
+        return json.load(f)
+
+
+def station_uuid(key, album, track):
+    h = hashlib.md5(f"tocador/{key}/{album}/{track}".encode()).hexdigest()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def searchable(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(character for character in normalized
+                   if not unicodedata.combining(character)).casefold()
+
+
+def cached_cover(key, album):
+    """Cache CDN artwork locally because the CDN rejects headerless QML requests."""
+    if not album.get("has_cover"):
+        return ""
+    base = ACERVOS[key]["base_url"]
+    encoded = urllib.parse.quote(album["path"], safe="")
+    url = f"{base}/{encoded}/capa-min.jpg"
+    cover_dir = Path(CACHE) / "covers" / "tocador"
+    cover_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    digest = hashlib.sha256(f"{key}\0{album['path']}".encode()).hexdigest()
+    target = cover_dir / f"{digest}.jpg"
+    try:
+        if target.stat().st_size > 0:
+            return target.resolve().as_uri()
+    except OSError:
+        pass
+
+    temporary = None
+    try:
+        request = urllib.request.Request(url, headers=COVER_HEADERS)
+        with urllib.request.urlopen(request, timeout=12) as response:
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if content_type and not content_type.startswith("image/"):
+                return ""
+            data = response.read(MAX_COVER_BYTES + 1)
+        if not data or len(data) > MAX_COVER_BYTES:
+            return ""
+        with tempfile.NamedTemporaryFile(dir=cover_dir, prefix="cover.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+        os.replace(temporary, target)
+        return target.resolve().as_uri()
+    except (OSError, ValueError):
+        return ""
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def main():
+    key = sys.argv[1] if len(sys.argv) > 1 else "homi"
+    count = min(500, max(1, int(sys.argv[2]))) if len(sys.argv) > 2 else 200
+    query = searchable(" ".join(sys.argv[3:]).strip())
+    if key not in ACERVOS:
+        sys.exit(f"Unknown acervo: {key}")
+    db = load(key)
+    # The playable origin is part of the connector definition, not catalog
+    # metadata.  A compromised catalog must not redirect playback elsewhere.
+    base = ACERVOS[key]["base_url"]
+    albums = [a for a in db["albums"] if a.get("tracks")]
+    if key == "homi":
+        albums = [a for a in albums if "hominis canidae" in (a.get("path") or "").lower()] or albums
+
+    if query:
+        terms = query.split()
+        matches = []
+        for album_row in albums:
+            album_text = searchable(" ".join(str(album_row.get(field) or "")
+                                               for field in ("title", "artist", "year", "path")))
+            album_match = all(term in album_text for term in terms)
+            tracks = [track for track in album_row["tracks"]
+                      if album_match or all(term in searchable(
+                          f"{track.get('title', '')} {track.get('artists', '')} {album_text}")
+                          for term in terms)]
+            if tracks:
+                matched = dict(album_row)
+                matched["tracks"] = tracks
+                matches.append(matched)
+        albums = matches
+    else:
+        random.shuffle(albums)
+
+    visible_albums, track_total = [], 0
+    for album_row in albums:
+        visible_albums.append(album_row)
+        track_total += len(album_row["tracks"])
+        if track_total >= count:
+            break
+    with ThreadPoolExecutor(max_workers=min(8, len(visible_albums) or 1)) as executor:
+        cover_values = list(executor.map(lambda album_row: cached_cover(key, album_row), visible_albums))
+    covers = {album_row["path"]: cover for album_row, cover in zip(visible_albums, cover_values)}
+
+    rows, seen = [], set()
+    # Lead with distinct albums so the visual browser is a real cover wall rather
+    # than several random tracks from the same handful of records.
+    for a in visible_albums:
+        enc = urllib.parse.quote(a["path"], safe="")
+        album_title = str(a.get("title") or "")
+        year = str(a.get("year") or "")
+        album = " · ".join(x for x in (album_title, year) if x and x != "0")
+        cover = covers.get(a["path"], "")
+        album_key = hashlib.sha1(f"tocador/{key}/{a['path']}".encode()).hexdigest()[:20]
+        for position, t in enumerate(a["tracks"], 1):
+            if len(rows) >= count:
+                break
+            uuid = station_uuid(key, a["path"], t["file"])
+            if uuid in seen:
+                continue
+            seen.add(uuid)
+            artist = t.get("artists") or a.get("artist") or ""
+            rows.append({
+                "uuid": uuid,
+                "kind": "track",
+                "provider": "tocador",
+                "source": key,
+                "name": f"{t['title']} — {artist}"[:160],
+                "title": t["title"],
+                "artist": artist,
+                "albumArtist": a.get("artist") or artist,
+                "album": album_title,
+                "albumKey": album_key,
+                "year": year if year != "0" else "",
+                "trackNumber": position,
+                "url": f"{base}/{enc}/{urllib.parse.quote(t['file'], safe='')}",
+                "homepage": f"https://tocador.cc/?acervo={key}&album={enc}",
+                "favicon": cover,
+                "cover": cover,
+                "country": "Brazil",
+                "countryCode": "BR",
+                "state": ACERVOS[key]["name"],
+                "language": "portuguese",
+                "tags": f"tocador,{ACERVOS[key]['name']},{album}"[:500],
+                "codec": "MP3",
+                "bitrate": 0,
+                "votes": 0,
+                "clicks": 0,
+                "latitude": None,
+                "longitude": None,
+            })
+        if len(rows) >= count:
+            break
+    json.dump(rows, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

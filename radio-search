@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Search radio, TV, Tocador archives, and configured music folders together."""
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import unicodedata
+
+
+MAX_ROWS_PER_SOURCE = 180
+MAX_RESULTS = 500
+
+
+def searchable(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(character for character in normalized
+                   if not unicodedata.combining(character)).casefold()
+
+
+def invoke(command):
+    try:
+        result = subprocess.run(
+            command, check=True, capture_output=True, text=True,
+            timeout=55, stdin=subprocess.DEVNULL,
+        )
+        rows = json.loads(result.stdout)
+        return rows if isinstance(rows, list) else []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def matches(row, terms):
+    text = searchable(" ".join(str(row.get(field) or "") for field in (
+        "name", "title", "artist", "album", "albumArtist", "country",
+        "state", "language", "tags", "codec",
+    )))
+    return all(term in text for term in terms)
+
+
+def rank(row, query, terms):
+    title = searchable(row.get("title") or row.get("name"))
+    fields = [searchable(row.get(field)) for field in
+              ("artist", "album", "albumArtist", "state", "country", "tags")]
+    score = 0
+    if title == query:
+        score = 100
+    elif query in fields:
+        score = 85
+    elif title.startswith(query):
+        score = 70
+    elif all(any(term in value for value in [title, *fields]) for term in terms):
+        score = 55
+    elif any(term in title for term in terms):
+        score = 30
+    provider = row.get("provider")
+    if provider == "local":
+        score += 45
+    elif provider == "tocador":
+        score += 10
+    return score
+
+
+def normalize(rows, source):
+    output = []
+    for original in rows[:MAX_ROWS_PER_SOURCE]:
+        if not isinstance(original, dict):
+            continue
+        row = dict(original)
+        if source == "radio":
+            row.update({
+                "provider": "radio-browser", "source": "radio", "kind": "station",
+                "title": row.get("name") or "Unknown station", "artist": "",
+                "album": "", "cover": row.get("favicon") or "",
+            })
+        elif source == "tv":
+            row.update({"source": "tv", "title": row.get("name") or "Unknown channel",
+                        "artist": "", "album": "", "cover": row.get("favicon") or ""})
+        row["connectorLabel"] = "TV · YOUTUBE" if row.get("provider") == "youtube" else {
+            "radio": "RADIO", "tv": "TV", "library": "MY MUSIC",
+            "uqt": "TOCADOR · UQT", "homi": "TOCADOR · HOMINIS",
+        }.get(row.get("source"), source.upper())
+        output.append(row)
+    return output
+
+
+def main():
+    query = " ".join(sys.argv[1:]).strip()[:128]
+    normalized_query = searchable(query)
+    terms = normalized_query.split()
+    if not terms:
+        print("[]")
+        return
+
+    directory = Path(__file__).resolve().parent
+    fetch_path = os.environ.get("TOCADOR_FETCH_PATH", str(directory / "radio-fetch"))
+    library_path = os.environ.get("TOCADOR_LIBRARY_PATH", str(directory / "radio-library"))
+    archive_path = os.environ.get("TOCADOR_ARCHIVE_PATH", str(directory / "radio-tocador"))
+    tv_path = os.environ.get("TOCADOR_TV_PATH", str(directory / "tv-fetch"))
+    commands = {
+        "radio": [fetch_path, "search", query],
+        "tv": [tv_path, "search", query],
+        "library": [library_path],
+        "uqt": [archive_path, "uqt", str(MAX_ROWS_PER_SOURCE), query],
+        "homi": [archive_path, "homi", str(MAX_ROWS_PER_SOURCE), query],
+    }
+    gathered = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(invoke, command): source
+                   for source, command in commands.items()}
+        for future in as_completed(futures):
+            source = futures[future]
+            rows = normalize(future.result(), source)
+            if source == "library":
+                rows = [row for row in rows if matches(row, terms)]
+            gathered.extend(rows)
+
+    deduplicated = {}
+    for row in gathered:
+        key = ":".join(str(row.get(field) or "")
+                       for field in ("provider", "source", "uuid"))
+        if key and key not in deduplicated:
+            deduplicated[key] = row
+    rows = list(deduplicated.values())
+    rows.sort(key=lambda row: (-rank(row, normalized_query, terms),
+                               searchable(row.get("name") or row.get("title")),
+                               searchable(row.get("source"))))
+    json.dump(rows[:MAX_RESULTS], sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

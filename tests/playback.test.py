@@ -66,10 +66,13 @@ class PlaybackTest(unittest.TestCase):
                         RADIO_ATLAS_QUEUE_FILE=str(runtime / "playlist.json"))
         self.runtime = runtime
 
-    def start(self, paths, position=0):
+    def start(self, paths, position=0, kind=None):
         urls = [f"http://127.0.0.1:{self.server.server_port}{path}" for path in paths]
         queue = [dict(uuid=f"station-{i}", name=path, url=url)
                  for i, (path, url) in enumerate(zip(paths, urls))]
+        if kind:
+            for row in queue:
+                row["kind"] = kind
         (self.runtime / "playlist.json").write_text(json.dumps(queue))
         self.log = tempfile.TemporaryFile(mode="w+")
         self.addCleanup(self.log.close)
@@ -125,6 +128,13 @@ class PlaybackTest(unittest.TestCase):
         self.wait_status(lambda s: s["paused"])
         self.action("toggle")
         self.wait_status(lambda s: not s["paused"])
+
+    def test_finished_track_advances_instead_of_failing(self):
+        self.start(["/short", "/live"], kind="track")
+        state = self.wait_status(lambda s: s.get("loaded") and s["station"]["uuid"] == "station-1")
+        self.assertEqual(state["error"], "")
+        self.assertFalse(state["paused"])
+        self.assertEqual(self.requests, ["/short", "/live"])
 
     def test_open_failure_stays_selected_and_previous_uses_failed_position(self):
         self.start(["/live", "/broken", "/other"], position=1)

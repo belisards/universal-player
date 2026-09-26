@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-: "${XDG_RUNTIME_DIR:?Radio Atlas requires XDG_RUNTIME_DIR}"
+: "${XDG_RUNTIME_DIR:?Tocador requires XDG_RUNTIME_DIR}"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 data_root=${XDG_DATA_HOME:-$HOME/.local/share}
 state_dir="$data_root/radio-atlas"
@@ -20,10 +20,17 @@ max_json_bytes=4194304
 max_ipc_bytes=65536
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 fetch_path=${RADIO_ATLAS_FETCH_PATH:-$script_dir/radio-fetch}
+tv_fetch_path=${RADIO_ATLAS_TV_FETCH_PATH:-$script_dir/tv-fetch}
 state_path="$script_dir/radio-state"
+tocador_path="$script_dir/radio-tocador"
+tocador_file="$runtime_dir/tocador.json"
+library_path="$script_dir/radio-library"
+library_file="$runtime_dir/library.json"
+config_root=${XDG_CONFIG_HOME:-$HOME/.config}
+connectors_file="$config_root/radio-atlas/connectors.json"
 status_script="$script_dir/radio-status.lua"
 version=$(jq -r '.version' "$script_dir/manifest.json")
-user_agent="Radio Atlas/$version (https://github.com/AksharP5/omarchy-radio-atlas)"
+user_agent="Tocador/$version (https://github.com/belisards/tocador-widget)"
 install -d -m 700 "$runtime_dir" "$state_dir"
 exec 8>"$runtime_dir/player.lock"
 
@@ -96,7 +103,8 @@ cancel_pending_plays() {
 
 playable_filter='def playable:
     (.url | type == "string")
-    and (.url | test("^https?://"; "i"))
+    and ((.url | test("^https?://"; "i"))
+      or ((.provider // "") == "local" and (.url | test("^file:///"))))
     and (.url | test("[\\r\\n]") | not);'
 
 configured_volume() {
@@ -193,6 +201,15 @@ status() {
       | {
           uuid: (if (.uuid | type) == "string" then .uuid[:64] else "" end),
           name: (if (.name | type) == "string" then .name[:160] else "" end),
+          kind: (if (.kind | type) == "string" then .kind[:24] else "" end),
+          provider: (if (.provider | type) == "string" then .provider[:40] else "" end),
+          source: (if (.source | type) == "string" then .source[:40] else "" end),
+          title: (if (.title | type) == "string" then .title[:160] else "" end),
+          artist: (if (.artist | type) == "string" then .artist[:160] else "" end),
+          album: (if (.album | type) == "string" then .album[:160] else "" end),
+          albumKey: (if (.albumKey | type) == "string" then .albumKey[:64] else "" end),
+          year: (if (.year | type) == "string" then .year[:16] else "" end),
+          favicon: (if (.favicon | type) == "string" then .favicon[:2048] else "" end),
           country: (if (.country | type) == "string" then .country[:100] else "" end),
           countryCode: (if (.countryCode | type) == "string" then .countryCode[:2] else "" end),
           latitude: (if (.latitude | type) == "number" then .latitude else null end),
@@ -380,6 +397,18 @@ source_stations() {
       valid_runtime_array "$selection_file" \
         && cat "$selection_file"
       ;;
+    local-selection)
+      valid_runtime_array "$selection_file" \
+        && cat "$selection_file"
+      ;;
+    tocador)
+      valid_runtime_array "$tocador_file" \
+        && cat "$tocador_file"
+      ;;
+    library)
+      valid_runtime_array "$library_file" \
+        && cat "$library_file"
+      ;;
     *)
       return 1
       ;;
@@ -394,14 +423,61 @@ valid_runtime_array() {
       "$path" >/dev/null 2>&1
 }
 
+valid_local_urls() {
+  python3 - "$1" "$connectors_file" "$HOME/Music" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+from urllib.parse import unquote, urlparse
+
+rows_path, config_path, fallback = sys.argv[1:]
+try:
+    with open(rows_path) as handle:
+        rows = json.load(handle)
+    environment_roots = os.environ.get("RADIO_ATLAS_MUSIC_DIRS", "")
+    if environment_roots:
+        roots = [Path(value).expanduser().resolve()
+                 for value in environment_roots.split(":") if value]
+    else:
+        try:
+            with open(config_path) as handle:
+                configured = json.load(handle).get("connectors", [])
+            roots = [Path(row["path"]).expanduser().resolve() for row in configured
+                     if row.get("type") == "folder" and row.get("enabled", True)]
+        except (OSError, ValueError, KeyError, TypeError):
+            roots = [Path(fallback).expanduser().resolve()]
+    for row in rows:
+        if row.get("provider") != "local":
+            continue
+        parsed = urlparse(row.get("url", ""))
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            raise ValueError
+        path = Path(unquote(parsed.path)).resolve()
+        if not any(path == root or path.is_relative_to(root) for root in roots):
+            raise ValueError
+except (OSError, ValueError, TypeError, AttributeError):
+    sys.exit(1)
+PY
+}
+
 refresh_saved_stations() {
   local source_file=$1
-  local uuids refreshed
-  uuids=$(jq -r 'map(.uuid) | join(",")' "$source_file")
-  [[ -n $uuids ]] || return 0
+  local radio_uuids tv_uuids refreshed
+  radio_uuids=$(jq -r 'map(select(.kind != "tv") | .uuid) | join(",")' "$source_file")
+  tv_uuids=$(jq -r 'map(select(.kind == "tv") | .uuid) | join(",")' "$source_file")
+  [[ -n $radio_uuids ]] && refresh_saved_from "$source_file" "$fetch_path" "$radio_uuids"
+  [[ -n $tv_uuids ]] && refresh_saved_from "$source_file" "$tv_fetch_path" "$tv_uuids"
+  return 0
+}
 
+refresh_saved_from() {
+  local source_file=$1
+  local fetcher=$2
+  local uuids=$3
+  local refreshed
   refreshed=$(mktemp "$runtime_dir/refreshed.XXXXXX")
-  if "$fetch_path" resolve "$uuids" > "$refreshed"; then
+  if "$fetcher" resolve "$uuids" > "$refreshed"; then
     jq -c --slurpfile refreshed "$refreshed" '
       ($refreshed[0] | INDEX(.uuid)) as $byUuid
       | map($byUuid[.uuid] // .)
@@ -414,7 +490,7 @@ refresh_saved_stations() {
 play_station() {
   local uuid=$1
   local scope=${2:-results}
-  local source_file starting_generation
+  local source_file starting_generation selected_provider
   starting_generation=$(player_generation)
   source_file=$(mktemp "$runtime_dir/source.XXXXXX")
   if ! source_stations "$scope" > "$source_file"; then
@@ -427,7 +503,15 @@ play_station() {
     refresh_saved_stations "$source_file"
   fi
 
-  if ! jq -e --arg uuid "$uuid" "$playable_filter
+  if ! valid_local_urls "$source_file"; then
+    rm -f "$source_file"
+    echo 'Local track is outside the configured music folders' >&2
+    exit 3
+  fi
+
+  local scope_playable_filter=$playable_filter
+
+  if ! jq -e --arg uuid "$uuid" "$scope_playable_filter
     any(.[];
       .uuid == \$uuid
       and playable)" "$source_file" >/dev/null; then
@@ -435,12 +519,15 @@ play_station() {
     echo 'Station is unavailable or has an unsafe stream URL' >&2
     exit 3
   fi
+  selected_provider=$(jq -r --arg uuid "$uuid" '
+    first(.[] | select(.uuid == $uuid) | (.provider // "radio-browser")) // ""
+  ' "$source_file")
 
   local temporary_playlist temporary_queue
   temporary_playlist=$(mktemp "$runtime_dir/playlist.XXXXXX")
   temporary_queue=$(mktemp "$runtime_dir/queue.XXXXXX")
   jq -c --arg uuid "$uuid" \
-    "$playable_filter
+    "$scope_playable_filter
     [.[] | select(playable)] as \$rows
     | (first(range(0; \$rows | length) as \$index
         | select(\$rows[\$index].uuid == \$uuid) | \$index)) as \$position
@@ -477,6 +564,9 @@ play_station() {
       mpv
       --no-video
       --force-window=no
+      --wayland-app-id=radio-atlas-tv
+      --ytdl-format='bv*[height<=1080]+ba/b[height<=1080]/b'
+      --title='${?media-title:${media-title}}${!media-title:Tocador TV}'
       --audio-display=no
       --idle=yes
       --loop-playlist=inf
@@ -531,13 +621,68 @@ play_station() {
       || { echo 'Radio player could not resume playback' >&2; exit 4; }
   fi
 
-  if [[ $uuid =~ ^[0-9A-Fa-f-]{20,}$ ]]; then
+  if [[ $selected_provider == radio-browser
+      && $uuid =~ ^[0-9A-Fa-f-]{20,}$ ]]; then
     curl --fail --silent --max-time 4 --proto '=https' \
       --user-agent "$user_agent" \
       "https://all.api.radio-browser.info/json/url/$uuid" >/dev/null 2>&1 8>&- &
   fi
 
   status
+}
+
+tocador_list() {
+  local acervo=${1:-tocador}
+  [[ $acervo =~ ^(tocador|uqt|homi)$ ]] || { echo 'Unknown tocador acervo' >&2; exit 2; }
+  local temporary uqt_file homi_file
+  temporary=$(mktemp "$runtime_dir/tocador.XXXXXX")
+  if [[ $acervo == tocador ]]; then
+    uqt_file=$(mktemp "$runtime_dir/tocador-uqt.XXXXXX")
+    homi_file=$(mktemp "$runtime_dir/tocador-homi.XXXXXX")
+    if ! "$tocador_path" uqt 250 > "$uqt_file" \
+        || ! "$tocador_path" homi 250 > "$homi_file" \
+        || ! valid_runtime_array "$uqt_file" \
+        || ! valid_runtime_array "$homi_file" \
+        || ! jq -sc 'add | .[:500]' "$uqt_file" "$homi_file" > "$temporary"; then
+      rm -f "$temporary" "$uqt_file" "$homi_file"
+      echo 'Tocador archives are unavailable' >&2
+      exit 3
+    fi
+    rm -f "$uqt_file" "$homi_file"
+  elif ! "$tocador_path" "$acervo" 200 > "$temporary"; then
+    rm -f "$temporary"
+    echo 'Tocador archive is unavailable' >&2
+    exit 3
+  fi
+  if ! valid_runtime_array "$temporary"; then
+    rm -f "$temporary"
+    echo 'Tocador archive is invalid' >&2
+    exit 3
+  fi
+  mv "$temporary" "$tocador_file"
+  cat "$tocador_file"
+}
+
+library_list() {
+  local refresh=${1:-}
+  local temporary
+  temporary=$(mktemp "$runtime_dir/library.XXXXXX")
+  local -a command=("$library_path")
+  [[ $refresh != refresh ]] || command+=(refresh)
+  if ! "${command[@]}" > "$temporary" || ! valid_runtime_array "$temporary"; then
+    rm -f "$temporary"
+    echo 'Music folders are unavailable' >&2
+    exit 3
+  fi
+  mv "$temporary" "$library_file"
+  cat "$library_file"
+}
+
+play_tocador() {
+  local uuid
+  uuid=$(tocador_list "$1" | jq -r '.[0].uuid // empty')
+  [[ -n $uuid ]] || { echo 'Tocador acervo is empty' >&2; exit 3; }
+  play_station "$uuid" tocador
 }
 
 resume_last() {
@@ -551,13 +696,22 @@ resume_last() {
 }
 
 action=${1:-status}
-[[ $action == play || $action == resume || $action == outputs ]] || flock -x 8
+[[ $action == play || $action == resume || $action == outputs || $action == tocador || $action == tocador-list || $action == library-list ]] || flock -x 8
 case "$action" in
   play)
     play_station "${2:-}" "${3:-results}"
     ;;
   resume)
     resume_last
+    ;;
+  tocador)
+    play_tocador "${2:-tocador}"
+    ;;
+  tocador-list)
+    tocador_list "${2:-tocador}"
+    ;;
+  library-list)
+    library_list "${2:-}"
     ;;
   toggle)
     player_command '{"command":["script-message","radio-atlas-toggle"]}'

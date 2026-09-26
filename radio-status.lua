@@ -33,7 +33,9 @@ local function clean_output(value)
 end
 
 local function empty_station()
-  return { uuid = "", name = "", country = "", countryCode = "" }
+  return { uuid = "", name = "", kind = "", provider = "", source = "",
+    title = "", artist = "", album = "", albumKey = "", year = "",
+    favicon = "", country = "", countryCode = "" }
 end
 
 local function status_station(station)
@@ -43,6 +45,15 @@ local function status_station(station)
   return {
     uuid = clean_text(station.uuid, 64),
     name = clean_text(station.name, 160),
+    kind = clean_text(station.kind, 24),
+    provider = clean_text(station.provider, 40),
+    source = clean_text(station.source, 40),
+    title = clean_text(station.title, 160),
+    artist = clean_text(station.artist, 160),
+    album = clean_text(station.album, 160),
+    albumKey = clean_text(station.albumKey, 64),
+    year = clean_text(station.year, 16),
+    favicon = clean_text(station.favicon, 2048),
     country = clean_text(station.country, 100),
     countryCode = clean_text(station.countryCode, 2),
     latitude = latitude,
@@ -123,12 +134,34 @@ mp.register_event("start-file", function()
   mp.set_property_native("user-data/radio-atlas-failure", nil)
   schedule_update()
 end)
+-- TV channels need video and their own request headers; radio stays audio-only.
+mp.add_hook("on_load", 50, function()
+  local position = mp.get_property_number("playlist-pos", -1) + 1
+  local path = mp.get_property("path")
+  local entry = read_queue()[position]
+  if type(entry) ~= "table" or entry.url ~= path then
+    -- A replaced playlist can load before its reload message arrives.
+    queue = nil
+    entry = read_queue()[position]
+  end
+  if type(entry) ~= "table" or entry.kind ~= "tv" or entry.url ~= path then return end
+  mp.set_property("file-local-options/vid", "auto")
+  mp.set_property("file-local-options/sid", "no")
+  mp.set_property("file-local-options/demuxer-max-bytes", "64MiB")
+  local user_agent = clean_text(entry.userAgent, 512)
+  if user_agent ~= "" then mp.set_property("file-local-options/user-agent", user_agent) end
+  local referrer = clean_text(entry.referrer, 2048)
+  if referrer ~= "" then mp.set_property("file-local-options/referrer", referrer) end
+end)
 mp.register_event("file-loaded", function()
   station_loaded = true
   schedule_update()
 end)
 mp.register_event("end-file", function(event)
-  if event.reason == "eof" or event.reason == "error" then
+  local entry = read_queue()[station_position + 1]
+  local finished_track = event.reason == "eof" and station_loaded
+    and type(entry) == "table" and entry.kind == "track"
+  if not finished_track and (event.reason == "eof" or event.reason == "error") then
     failure = {
       position = station_position,
       message = station_loaded and "Stream disconnected" or "Station could not be played",

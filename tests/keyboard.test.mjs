@@ -30,7 +30,7 @@ TestCase {
   property int randomRequests: 0
   function dismiss() { dismissals++ }
   function showWorld() { worldRequests++ }
-  function tuneRandom() { randomRequests++ }
+  function playRandom() { randomRequests++ }
   ${helpFunctions}
 
   ${card}

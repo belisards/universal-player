@@ -1,0 +1,25 @@
+{
+  "connectors": [
+    {
+      "id": "music",
+      "type": "folder",
+      "name": "My Music",
+      "path": "~/Music",
+      "enabled": true
+    },
+    {
+      "id": "nextcloud",
+      "type": "folder",
+      "name": "Nextcloud Music",
+      "path": "/path/to/Nextcloud/Music",
+      "enabled": false
+    },
+    {
+      "id": "youtube",
+      "type": "youtube-subscriptions",
+      "name": "YouTube subscriptions",
+      "auth": "~/.config/yt-music/auth.json",
+      "enabled": false
+    }
+  ]
+}

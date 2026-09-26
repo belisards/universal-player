@@ -17,6 +17,7 @@ function session() {
     worldExpansionMisses: 0,
     worldStations: [{ uuid: "first" }],
     mode: "world",
+    catalog: "radio",
     RadioModel: model,
     panel: {},
     windowRevealTimer: { stop() {} },
@@ -61,4 +62,10 @@ run.context.opened = false
 run.finish([{ uuid: "third" }])
 assert.equal(run.context.worldStations.length, 2)
 assert.equal(run.delays.length, 3)
+const tv = session()
+tv.context.catalog = "tv"
+tv.context.scheduleWorldExpansion(800)
+tv.finish([{ uuid: "radio" }])
+assert.equal(tv.delays.length, 0)
+assert.equal(tv.context.worldStations.length, 1)
 console.log("World expansion tests passed")

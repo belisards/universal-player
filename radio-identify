@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-: "${XDG_RUNTIME_DIR:?Radio Atlas requires XDG_RUNTIME_DIR}"
+: "${XDG_RUNTIME_DIR:?Tocador requires XDG_RUNTIME_DIR}"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 socket="$runtime_dir/mpv.sock"
 result_file="$runtime_dir/identify.json"
@@ -35,7 +35,7 @@ write_result() {
 
 notify() {
   $notify || return 0
-  notify-send -a 'Radio Atlas' -i audio-x-generic "$1" "${2:-}" 2>/dev/null || true
+  notify-send -a 'Tocador' -i audio-x-generic "$1" "${2:-}" 2>/dev/null || true
 }
 
 ipc() {

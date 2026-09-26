@@ -2,3 +2,10 @@
 *.qmlc
 *.jsc
 /videos/
+
+# Real connector paths belong in ~/.config/radio-atlas/connectors.json.
+# Keep only connectors.json.example in this public repository.
+/connectors.json
+/connectors.local.json
+/.env
+__pycache__/

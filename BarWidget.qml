@@ -18,6 +18,7 @@ BarWidget {
   property int pendingVolume: -1
   property string playerTitle: ""
   property string playerStationUuid: ""
+  property string playerKind: ""
   property string identifiedTrack: ""
   property string identifiedStationUuid: ""
   property bool statusReady: false
@@ -68,6 +69,7 @@ BarWidget {
         ? Math.max(0, Math.min(100, nextVolume)) : 70
       if (root.pendingVolume < 0) root.playerVolume = root.reportedVolume
       root.playerStationUuid = String((state.station && state.station.uuid) || "")
+      root.playerKind = String((state.station && state.station.kind) || "")
       root.playerTitle = root.singleLineText(
         state.title || (state.station && state.station.name) || "", 160)
       root.playerStateReady = true
@@ -173,14 +175,14 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "\uf0ac"
+    text: root.playerKind === "track" ? "\uf001" : "\uf0ac"
     active: root.playerRunning && !root.playerPaused
     tooltipText: root.playerRunning
-      ? (root.streamError ? root.streamError + ": " : root.playerPaused ? "Radio paused: " : "Playing: ")
+      ? (root.streamError ? root.streamError + ": " : root.playerPaused ? "Paused: " : "Playing: ")
         + root.safeTooltipText(root.playerTitle)
         + (root.currentIdentifiedTrack ? "  ·  ♪ " + root.safeTooltipText(root.currentIdentifiedTrack) : "")
         + "  ·  " + (root.playerMuted ? "muted" : root.playerVolume + "%")
-      : "Open Radio Atlas"
+      : "Open Tocador"
 
     onPressed: function(mouseButton) {
       if (!root.bar) return

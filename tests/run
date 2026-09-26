@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'status=$?; printf "Test failed at line %s (status %s)\n" "$LINENO" "$status" >&2' ERR
 
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -19,7 +20,7 @@ assert_no_match() {
 jq -e '
   .schemaVersion == 1
   and .id == "akshar.radio-atlas"
-  and .version == "0.1.9"
+  and .version == "0.2.0"
   and (.kinds | index("panel"))
   and (.kinds | index("bar-widget"))
   and .keepLoaded == true
@@ -30,6 +31,10 @@ bash -n "$project_dir/radio-fetch" "$project_dir/radio-player" \
   "$project_dir/radio-window" "$project_dir/radio-identify" \
   "$project_dir/tests/fixtures/"*
 luac -p "$project_dir/radio-status.lua"
+python3 "$project_dir/tests/library.test.py"
+python3 "$project_dir/tests/tocador.test.py"
+python3 "$project_dir/tests/search.test.py"
+python3 "$project_dir/tests/tv.test.py"
 node "$project_dir/tests/model.test.mjs"
 node "$project_dir/tests/expansion.test.mjs"
 node "$project_dir/tests/selection.test.mjs"
@@ -80,7 +85,7 @@ sed -n '/function randomExclusions/,/^  }/p' "$project_dir/RadioAtlas.qml" \
   | rg -Fq 'append(lastRandomUuid)'
 sed -n '/function randomExclusions/,/^  }/p' "$project_dir/RadioAtlas.qml" \
   | rg -Fq 'i < recent.length'
-world_update_line=$(rg -n 'root.worldStations = RadioModel.mergeStations' "$project_dir/RadioAtlas.qml" \
+world_update_line=$(rg -n 'root.worldStations = nextWorld' "$project_dir/RadioAtlas.qml" \
   | cut -d: -f1)
 pending_fetch_line=$(rg -n 'if \(root.pendingFetchAction\)' "$project_dir/RadioAtlas.qml" \
   | cut -d: -f1)
@@ -173,10 +178,14 @@ assert_no_match 'resizewindowpixel|centerwindow|hl\.dsp\.window\.(float|resize|c
   "$project_dir/RadioAtlas.qml"
 rg -Fq 'hl.window_rule({' "$project_dir/radio-window"
 rg -Fq 'initial_class = "^org[.]quickshell$"' "$project_dir/radio-window"
-rg -Fq 'initial_title = "^Radio Atlas$"' "$project_dir/radio-window"
+rg -Fq 'initial_title = "^Tocador$"' "$project_dir/radio-window"
 rg -Fq 'float = true' "$project_dir/radio-window"
 rg -Fq 'center = true' "$project_dir/radio-window"
 rg -Fq 'size = { $width, $height }' "$project_dir/radio-window"
+tv_rule_block=$(sed -n '/name = "radio-atlas-tv"/,/^})/p' "$project_dir/radio-window")
+rg -Fq 'float = true' <<<"$tv_rule_block"
+rg -Fq 'center = true' <<<"$tv_rule_block"
+rg -Fq 'size = { 960, 540 }' <<<"$tv_rule_block"
 rg -Fq 'no_anim = true' "$project_dir/radio-window"
 rg -Fq 'border_size = 0' "$project_dir/radio-window"
 rg -Fq 'HyprlandWindow.opacity: root.windowFrameReady ? 1 : 0' "$project_dir/RadioAtlas.qml"
@@ -288,9 +297,13 @@ trap cleanup EXIT
 export XDG_RUNTIME_DIR="$test_root/runtime"
 export XDG_DATA_HOME="$test_root/data"
 export XDG_CACHE_HOME="$test_root/cache"
+export XDG_CONFIG_HOME="$test_root/config"
 runtime_dir="$XDG_RUNTIME_DIR/omarchy-radio-atlas"
 cache_dir="$XDG_CACHE_HOME/omarchy-radio-atlas"
-mkdir -p "$runtime_dir"
+music_dir="$test_root/music"
+mkdir -p "$runtime_dir" "$XDG_CONFIG_HOME/radio-atlas" "$music_dir"
+printf '%s\n' "{\"connectors\":[{\"id\":\"test\",\"type\":\"folder\",\"path\":\"$music_dir\",\"enabled\":true}]}" \
+  > "$XDG_CONFIG_HOME/radio-atlas/connectors.json"
 
 for device_and_output in "auto:" "pipewire/auto:auto"; do
   RADIO_ATLAS_STATUS_FILE="$test_root/status.json" \
@@ -776,6 +789,19 @@ jq -e 'length == 3
   and .[2].uuid == "11111111-1234-1234-1234-111111111111"' \
   "$runtime_dir/playlist.json" >/dev/null
 
+touch "$music_dir/one.mp3" "$music_dir/two.mp3"
+local_selection_fixture="[
+  {\"uuid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kind\":\"track\",\"provider\":\"local\",\"name\":\"One\",\"url\":\"file://$music_dir/one.mp3\"},
+  {\"uuid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"kind\":\"track\",\"provider\":\"local\",\"name\":\"Two\",\"url\":\"file://$music_dir/two.mp3\"}
+]"
+printf '%s\n' "$local_selection_fixture" > "$runtime_dir/play-selection.json"
+RADIO_ATLAS_TEST_SOCAT_MODE=success PATH="$project_dir/tests/fixtures:$PATH" \
+  "$project_dir/radio-player" play \
+  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa local-selection \
+  >/dev/null
+jq -e 'length == 2 and .[0].provider == "local" and .[1].name == "Two"' \
+  "$runtime_dir/playlist.json" >/dev/null
+
 "$project_dir/radio-state" played 12345678-1234-1234-1234-123456789abc >/dev/null
 RADIO_ATLAS_FETCH_PATH="$project_dir/tests/fixtures/radio-fetch" \
 RADIO_ATLAS_TEST_FETCH_READY="$fetch_ready" \
@@ -934,6 +960,13 @@ printf '%s\n' "$unsafe" > "$runtime_dir/results.json"
 if "$project_dir/radio-player" play abcdefab-1234-1234-1234-abcdefabcdef results \
   >/dev/null 2>&1; then
   echo "Unsafe stream URL was accepted" >&2
+  exit 1
+fi
+unsafe_local='[{"uuid":"abcdefab-1234-1234-1234-abcdefabcdef","provider":"local","name":"Unsafe local","url":"file:///etc/passwd"}]'
+printf '%s\n' "$unsafe_local" > "$runtime_dir/play-selection.json"
+if "$project_dir/radio-player" play abcdefab-1234-1234-1234-abcdefabcdef local-selection \
+  >/dev/null 2>&1; then
+  echo "Local track outside configured folders was accepted" >&2
   exit 1
 fi
 

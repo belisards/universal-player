@@ -21,6 +21,8 @@ Item {
   property var favorites: []
   property var recent: []
   property string mode: "world"
+  property string catalog: "radio"
+  property var catalogWorlds: ({})
   property string activeCountryCode: ""
   property string activeCountryName: ""
   property bool helpVisible: false
@@ -31,6 +33,7 @@ Item {
   property bool fetching: false
   property string fetchAction: ""
   property string fetchValue: ""
+  property string fetchCatalog: ""
   property string pendingFetchAction: ""
   property string pendingFetchValue: ""
   property string fetchError: ""
@@ -84,9 +87,17 @@ Item {
   property bool localReloadPending: false
   property var pendingFavoriteRequests: []
   property string pendingRecentUuid: ""
+  property string albumSource: "library"
+  property string albumError: ""
+  property string universalSearchOutput: ""
+  property string universalSearchQuery: ""
 
   readonly property string fetchPath: Qt.resolvedUrl("radio-fetch").toString().replace(/^file:\/\//, "")
+  readonly property string tvFetchPath: Qt.resolvedUrl("tv-fetch").toString().replace(/^file:\/\//, "")
+  readonly property bool tvCatalog: catalog === "tv"
+  readonly property string stationNoun: tvCatalog ? "channels" : "stations"
   readonly property string playerPath: Qt.resolvedUrl("radio-player").toString().replace(/^file:\/\//, "")
+  readonly property string searchPath: Qt.resolvedUrl("radio-search").toString().replace(/^file:\/\//, "")
   readonly property string statePath: Qt.resolvedUrl("radio-state").toString().replace(/^file:\/\//, "")
   readonly property string runtimePath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-radio-atlas"
   readonly property string statusPath: runtimePath + "/status.json"
@@ -98,6 +109,24 @@ Item {
   readonly property var displayStations: mode === "favorites"
     ? favorites
     : (mode === "recent" ? recent : results)
+  readonly property bool albumMode: mode === "albums"
+  readonly property var albumCards: {
+    var cards = []
+    var seen = ({})
+    for (var i = 0; i < results.length; i++) {
+      var row = results[i]
+      var key = String(row && (row.albumKey || row.uuid) || "")
+      if (!key || seen["$" + key]) continue
+      seen["$" + key] = true
+      cards.push(row)
+    }
+    return cards
+  }
+  readonly property string albumSourceTitle: albumSource === "library"
+    ? "MY MUSIC" : "TOCADOR"
+  readonly property string albumSourceSubtitle: albumSource === "library"
+    ? albumCards.length + " albums from your connected folders"
+    : albumCards.length + " albums from UQT + Hominis Canidae"
   readonly property var currentGeoStations:
     RadioModel.mergeGeoStations(worldStations, displayStations, countries)
   readonly property string playingStationName: playingStation
@@ -109,6 +138,8 @@ Item {
   }
   readonly property string trackLine: playingTrackTitle
     || (identifying ? "Listening for the song…" : identifiedTrack)
+  readonly property bool playingTrack: playingStation && playingStation.kind === "track"
+  readonly property bool playingTv: playingStation && playingStation.kind === "tv"
 
   function applyIdentifyState(raw) {
     try {
@@ -177,7 +208,8 @@ Item {
         { input: "UP / DOWN", action: "Select station" },
         { input: "ENTER", action: "Play selected station" },
         { input: "SPACE", action: "Play or pause" },
-        { input: "R", action: "Tune randomly" },
+        { input: "R", action: "Play something random" },
+        { input: "T", action: "Switch between radio and TV" },
         { input: "F", action: "Favorite selected station" },
         { input: "I", action: "Identify playing song" },
         { input: "M", action: "Mute or unmute" },
@@ -241,6 +273,13 @@ Item {
     if (payload.action === "random") {
       if (worldStations.length === 0) showWorld()
       tuneRandom()
+    } else if (payload.action === "tocador") {
+      if (worldStations.length === 0) showWorld()
+      showAlbums("tocador")
+    } else if (payload.action === "albums") {
+      showAlbums(payload.source || "library")
+    } else if (payload.action === "tv") {
+      showCatalog("tv")
     } else if (worldStations.length === 0) showWorld()
     scheduleWorldExpansion(800)
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -343,7 +382,7 @@ Item {
   }
 
   function scheduleWorldExpansion(delay) {
-    if (!opened || worldStations.length === 0
+    if (!opened || catalog !== "radio" || worldStations.length === 0
         || worldStations.length >= worldStationLimit || worldExpansionMisses >= 3) return
     worldExpandTimer.interval = Math.max(500, Number(delay || 1600))
     worldExpandTimer.restart()
@@ -363,7 +402,7 @@ Item {
   function startFetch(action, value) {
     var nextValue = value || ""
     if (fetchProcess.running) {
-      if (fetchAction === action && fetchValue === nextValue) {
+      if (fetchAction === action && fetchValue === nextValue && fetchCatalog === catalog) {
         cancelPendingFetch()
         return
       }
@@ -376,10 +415,12 @@ Item {
     fetching = true
     fetchAction = action
     fetchValue = nextValue
+    fetchCatalog = catalog
     fetchError = ""
     fetchOutput = ""
     fetchStderr = ""
-    fetchProcess.command = nextValue ? [fetchPath, action, nextValue] : [fetchPath, action]
+    var path = tvCatalog ? tvFetchPath : fetchPath
+    fetchProcess.command = nextValue ? [path, action, nextValue] : [path, action]
     fetchProcess.running = true
   }
 
@@ -394,6 +435,22 @@ Item {
     if (refresh !== false) startFetch("world", "")
   }
 
+  function showCatalog(name) {
+    var next = name === "tv" ? "tv" : "radio"
+    if (next !== catalog) {
+      var worlds = Object.assign({}, catalogWorlds)
+      worlds[catalog] = worldStations
+      catalogWorlds = worlds
+      worldExpandTimer.stop()
+      if (worldExpandProcess.running) worldExpandProcess.running = false
+      catalog = next
+      worldStations = Array.isArray(worlds[next]) ? worlds[next] : []
+      worldExpansionMisses = 0
+    }
+    showWorld()
+    scheduleWorldExpansion(800)
+  }
+
   function showFavorites() {
     searchDebounce.stop()
     cancelPendingFetch()
@@ -403,6 +460,41 @@ Item {
     fetchError = ""
     localError = ""
     setSelection(favorites.length > 0 ? 0 : -1)
+  }
+
+  function showAlbums(source, refresh) {
+    searchDebounce.stop()
+    cancelPendingFetch()
+    searchField.text = ""
+    var nextSource = String(source || albumSource)
+    if (nextSource !== "library" && nextSource !== "tocador")
+      nextSource = "library"
+    albumSource = nextSource
+    restorePlayingCountry(false)
+    fetchError = ""
+    localError = ""
+    albumError = ""
+    setStationList("albums", [])
+    if (albumProcess.running) albumProcess.running = false
+    albumProcess.source = nextSource
+    albumProcess.command = nextSource === "library"
+      ? [playerPath, "library-list"].concat(refresh === true ? ["refresh"] : [])
+      : [playerPath, "tocador-list", nextSource]
+    albumProcess.running = true
+  }
+
+  function showTocador() { showAlbums("tocador") }
+
+  function playAlbum(row) {
+    if (!row) return
+    var key = String(row.albumKey || row.uuid || "")
+    var tracks = results.filter(function(candidate) {
+      return String(candidate && (candidate.albumKey || candidate.uuid) || "") === key
+    })
+    if (tracks.length === 0) return
+    var index = RadioModel.indexByUuid(displayStations, row.uuid)
+    if (index >= 0) setSelection(index)
+    playStation(row, albumSource === "library" ? "local-selection" : "selection", tracks)
   }
 
   function showRecent() {
@@ -431,7 +523,12 @@ Item {
   function search(text) {
     var query = String(text || "").trim()
     if (!previewSearch(query)) return
-    startFetch("search", query)
+    if (universalSearchProcess.running) universalSearchProcess.running = false
+    universalSearchQuery = query
+    universalSearchOutput = ""
+    universalSearchProcess.query = query
+    universalSearchProcess.command = [searchPath, query]
+    universalSearchProcess.running = true
   }
 
   function browseCountry(code, name) {
@@ -471,6 +568,20 @@ Item {
     startFetch("random", randomExclusions())
   }
 
+  function playRandom() {
+    if (!albumMode) {
+      tuneRandom()
+      return
+    }
+    var playingKey = playingStation ? String(playingStation.albumKey || playingStation.uuid || "") : ""
+    var pool = albumCards.filter(function(row) {
+      return String(row.albumKey || row.uuid || "") !== playingKey
+    })
+    if (pool.length === 0) pool = albumCards
+    if (pool.length === 0) return
+    playAlbum(pool[Math.floor(Math.random() * pool.length)])
+  }
+
   function randomExclusions() {
     var output = []
     var seen = ({})
@@ -504,6 +615,7 @@ Item {
     if (mode === "world") return "world"
     if (mode === "favorites") return "favorites"
     if (mode === "recent") return "recent"
+    if (mode === "albums") return albumSource === "library" ? "library" : "tocador"
     return "results"
   }
 
@@ -529,12 +641,13 @@ Item {
     }
     cancelPendingPlay()
     var playerScope = scope
-    if (scope === "world" || scope === "results") {
+    if (scope === "world" || scope === "results"
+        || scope === "selection" || scope === "local-selection") {
       if (!writeSelection(playSelectionFile, station, stations)) {
         playerError = "Could not prepare this station"
         return
       }
-      playerScope = "selection"
+      playerScope = scope === "local-selection" ? "local-selection" : "selection"
     }
     playCancellationRequested = false
     highlightStationCountry(station, true)
@@ -786,9 +899,13 @@ Item {
     if (localError) return localError
     if (mode === "favorites") return "No favorites yet. Select a station and press F."
     if (mode === "recent") return "No listening history yet."
-    if (mode === "search") return "No stations match “" + String(searchField.text || "").trim() + "”."
-    if (mode === "country") return "No working stations found in " + (activeCountryName || "this country") + "."
-    return "No working stations found."
+    if (mode === "albums") return albumError || (albumProcess.running
+      ? "Loading " + albumSourceTitle + "…" : "No albums found in this connector.")
+    if (mode === "search") return universalSearchProcess.running
+      ? "Searching Radio, TV, Tocador, and My Music…"
+      : "Nothing matches “" + String(searchField.text || "").trim() + "”."
+    if (mode === "country") return "No working " + stationNoun + " found in " + (activeCountryName || "this country") + "."
+    return "No working " + stationNoun + " found."
   }
 
   FileView {
@@ -899,11 +1016,21 @@ Item {
           stations = null
         }
       }
+      var sameCatalog = root.fetchCatalog === root.catalog
+      // TV's world is a complete snapshot; replacing it drops ended YouTube lives.
+      var nextWorld = null
       if (root.fetchAction === "world" && stations !== null)
-        root.worldStations = RadioModel.mergeStations(
-          root.worldStations, stations, root.worldStationLimit)
-      if (root.fetchAction === "world" && stations !== null)
+        nextWorld = root.fetchCatalog === "tv" ? stations.slice(0, root.worldStationLimit)
+          : RadioModel.mergeStations(sameCatalog ? root.worldStations
+            : root.catalogWorlds[root.fetchCatalog], stations, root.worldStationLimit)
+      if (nextWorld !== null && !sameCatalog) {
+        var worlds = Object.assign({}, root.catalogWorlds)
+        worlds[root.fetchCatalog] = nextWorld
+        root.catalogWorlds = worlds
+      } else if (nextWorld !== null) {
+        root.worldStations = nextWorld
         root.scheduleWorldExpansion(1200)
+      }
 
       if (root.pendingFetchAction) {
         var nextAction = root.pendingFetchAction
@@ -920,13 +1047,14 @@ Item {
       }
 
       root.fetching = false
-      if (root.mode !== root.fetchAction) return
+      if (!sameCatalog || root.mode !== root.fetchAction) return
       if (root.fetchAction === "search"
           && String(searchField.text || "").trim() !== root.fetchValue) return
       if (exitCode !== 0) {
+        var service = root.tvCatalog ? "The TV channel list" : "Radio Browser"
         root.fetchError = root.displayStations.length > 0
-          ? "Showing cached stations · Radio Browser is unavailable"
-          : "Radio Browser is unavailable. Try again shortly."
+          ? "Showing cached " + root.stationNoun + " · " + service + " is unavailable"
+          : service + " is unavailable. Try again shortly."
         return
       }
       if (stations === null) {
@@ -965,7 +1093,7 @@ Item {
     onExited: function(exitCode) {
       var output = root.worldExpandOutput
       root.worldExpandOutput = ""
-      if (!root.opened) return
+      if (!root.opened || root.catalog !== "radio") return
       root.worldExpansionMisses += 1
       if (exitCode !== 0) {
         root.scheduleWorldExpansion(30000)
@@ -995,6 +1123,57 @@ Item {
       root.worldStations = merged
       if (root.mode === "world") root.results = merged
       root.scheduleWorldExpansion(1600)
+    }
+  }
+
+  Process {
+    id: albumProcess
+    property string source: "library"
+    property string output: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: albumProcess.output = text
+    }
+    onExited: function(exitCode) {
+      if (root.mode !== "albums" || source !== root.albumSource) return
+      var stations = null
+      try { stations = JSON.parse(output || "null") } catch (e) {}
+      if (exitCode !== 0 || !Array.isArray(stations)) {
+        root.albumError = source === "library"
+          ? "Your connected music folders could not be indexed."
+          : "tocador.cc is unavailable. Try again shortly."
+        return
+      }
+      root.setStationList("albums", stations)
+    }
+  }
+
+  Process {
+    id: universalSearchProcess
+    property string query: ""
+    property string errorOutput: ""
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.universalSearchOutput = text
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: universalSearchProcess.errorOutput = text
+    }
+    onExited: function(exitCode) {
+      if (root.mode !== "search"
+          || String(searchField.text || "").trim() !== query) return
+      var rows = null
+      try { rows = JSON.parse(root.universalSearchOutput || "null") } catch (error) {}
+      root.universalSearchOutput = ""
+      if (exitCode !== 0 || !Array.isArray(rows)) {
+        root.fetchError = "Universal search could not reach the connectors."
+        return
+      }
+      root.fetchError = ""
+      root.setStationList("search", rows)
     }
   }
 
@@ -1269,7 +1448,7 @@ Item {
   FloatingWindow {
     id: panel
     visible: false
-    title: "Radio Atlas"
+    title: "Tocador"
     color: root.background
     implicitWidth: root.preferredWidth
     implicitHeight: root.preferredHeight
@@ -1337,7 +1516,7 @@ Item {
           else root.playSelected()
           event.accepted = true
         } else if (event.key === Qt.Key_R) {
-          root.tuneRandom()
+          root.playRandom()
           event.accepted = true
         } else if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) {
           root.changePlayerVolume(5)
@@ -1347,6 +1526,9 @@ Item {
           event.accepted = true
         } else if (event.key === Qt.Key_M) {
           root.playerAction("mute")
+          event.accepted = true
+        } else if (event.key === Qt.Key_T) {
+          root.showCatalog(root.tvCatalog ? "radio" : "tv")
           event.accepted = true
         } else if (event.key === Qt.Key_I) {
           root.identifySong()
@@ -1383,7 +1565,7 @@ Item {
           anchors.left: parent.left
           anchors.leftMargin: Style.spacing.panelPadding
           anchors.verticalCenter: parent.verticalCenter
-          text: "RADIO ATLAS"
+          text: "TOCADOR"
           textFormat: Text.PlainText
           color: root.foreground
           font.family: Style.font.menuFamily
@@ -1397,7 +1579,8 @@ Item {
           anchors.rightMargin: Style.spacing.sm
           anchors.verticalCenter: parent.verticalCenter
           width: Math.min(Style.space(330), card.width * 0.32)
-          placeholderText: "Search station, country, or genre"
+          visible: true
+          placeholderText: "Search"
           maximumLength: 128
           foreground: root.foreground
           accent: root.accent
@@ -1413,15 +1596,45 @@ Item {
 
         Button {
           id: randomButton
-          anchors.right: helpButton.left
+          anchors.right: favoritesNavButton.left
           anchors.rightMargin: Style.spacing.xs
           anchors.verticalCenter: parent.verticalCenter
           iconText: "\uf074"
-          tooltipText: "Tune randomly (R)"
+          text: "Random"
+          tooltipText: root.albumMode ? "Play a random album (R)"
+            : (root.tvCatalog ? "Play a random channel (R)" : "Play a random station (R)")
           focusable: true
           foreground: root.foreground
           accent: root.accent
-          onClicked: root.tuneRandom()
+          onClicked: root.playRandom()
+        }
+
+        Button {
+          id: favoritesNavButton
+          anchors.right: historyNavButton.left
+          anchors.rightMargin: Style.spacing.xs
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: "\uf005"
+          tooltipText: "Radio favorites"
+          selected: root.mode === "favorites"
+          focusable: true
+          foreground: root.foreground
+          accent: root.accent
+          onClicked: root.showFavorites()
+        }
+
+        Button {
+          id: historyNavButton
+          anchors.right: helpButton.left
+          anchors.rightMargin: Style.spacing.xs
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: "\uf1da"
+          tooltipText: "Listening history"
+          selected: root.mode === "recent"
+          focusable: true
+          foreground: root.foreground
+          accent: root.accent
+          onClicked: root.showRecent()
         }
 
         Button {
@@ -1477,6 +1690,7 @@ Item {
           anchors.top: parent.top
           anchors.bottom: parent.bottom
           anchors.right: sidebar.left
+          visible: !root.albumMode
 
           Globe {
             id: globe
@@ -1538,6 +1752,32 @@ Item {
           }
         }
 
+        AlbumWorld {
+          id: albumWorld
+          anchors.left: parent.left
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          anchors.right: sidebar.left
+          anchors.margins: Style.spacing.lg
+          visible: root.albumMode
+          model: root.albumCards
+          selectedUuid: root.selectedStation ? String(root.selectedStation.uuid || "") : ""
+          selectedAlbumKey: root.selectedStation ? String(root.selectedStation.albumKey || "") : ""
+          playingUuid: root.playingStationUuid
+          playingAlbumKey: root.playingStation ? String(root.playingStation.albumKey || "") : ""
+          foreground: root.foreground
+          accent: root.accent
+          background: root.mapBackground
+          dim: root.dim
+          faint: root.faint
+          fontFamily: Style.font.menuFamily
+          sourceTitle: root.albumSourceTitle
+          sourceSubtitle: root.albumSourceSubtitle
+          loading: albumProcess.running
+          onAlbumActivated: function(row) { root.playAlbum(row) }
+          onReshuffleRequested: root.showAlbums(root.albumSource, true)
+        }
+
         Rectangle {
           anchors.top: parent.top
           anchors.bottom: parent.bottom
@@ -1567,28 +1807,41 @@ Item {
               spacing: Style.spacing.xs
 
               Button {
-                text: "World"
-                selected: root.mode === "world"
+                text: "Radio"
+                selected: !root.albumMode && root.mode !== "favorites" && root.mode !== "recent"
+                  && !root.tvCatalog
                 foreground: root.foreground
                 accent: root.accent
                 fontSize: Style.font.caption
-                onClicked: root.showWorld()
+                onClicked: root.showCatalog("radio")
               }
               Button {
-                text: "Favorites"
-                selected: root.mode === "favorites"
+                text: "TV"
+                tooltipText: "Free live TV channels from iptv-org (T)"
+                selected: !root.albumMode && root.mode !== "favorites" && root.mode !== "recent"
+                  && root.tvCatalog
                 foreground: root.foreground
                 accent: root.accent
                 fontSize: Style.font.caption
-                onClicked: root.showFavorites()
+                onClicked: root.showCatalog("tv")
               }
               Button {
-                text: "Recent"
-                selected: root.mode === "recent"
+                text: "Tocador"
+                tooltipText: "UQT + Hominis Canidae curated archives"
+                selected: root.albumMode && root.albumSource === "tocador"
                 foreground: root.foreground
                 accent: root.accent
                 fontSize: Style.font.caption
-                onClicked: root.showRecent()
+                onClicked: root.showAlbums("tocador")
+              }
+              Button {
+                text: "My Music"
+                tooltipText: "Configured local and synced folders"
+                selected: root.albumMode && root.albumSource === "library"
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.caption
+                onClicked: root.showAlbums("library")
               }
             }
 
@@ -1620,9 +1873,10 @@ Item {
               id: stationRow
               required property var modelData
               required property int index
+              readonly property bool isTrack: String(modelData.kind || "") === "track"
 
               width: stationList.width
-              height: Style.space(64)
+              height: isTrack ? Style.space(72) : Style.space(64)
               color: root.playingStationUuid === stationRow.modelData.uuid
                 ? Style.selectedFillFor(root.foreground, root.accent)
                 : (rowMouse.containsMouse
@@ -1657,9 +1911,42 @@ Item {
                 border.width: 1
               }
 
-              Text {
+              Rectangle {
+                id: trackCover
+                visible: stationRow.isTrack
                 anchors.left: parent.left
                 anchors.leftMargin: Style.spacing.md
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(48)
+                height: width
+                radius: Style.cornerRadius
+                color: Style.hoverFillFor(root.foreground, root.accent)
+                clip: true
+
+                Image {
+                  id: trackCoverImage
+                  anchors.fill: parent
+                  source: String(stationRow.modelData.cover || stationRow.modelData.favicon || "")
+                  fillMode: Image.PreserveAspectCrop
+                  asynchronous: true
+                  cache: true
+                  visible: status === Image.Ready
+                }
+
+                Text {
+                  anchors.centerIn: parent
+                  visible: !trackCoverImage.visible
+                  text: "♪"
+                  textFormat: Text.PlainText
+                  color: root.accent
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.heading
+                }
+              }
+
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: stationRow.isTrack ? Style.space(72) : Style.spacing.md
                 anchors.right: favoriteButton.left
                 anchors.rightMargin: Style.spacing.sm
                 anchors.top: parent.top
@@ -1675,14 +1962,17 @@ Item {
 
               Text {
                 anchors.left: parent.left
-                anchors.leftMargin: Style.spacing.md
+                anchors.leftMargin: stationRow.isTrack ? Style.space(72) : Style.spacing.md
                 anchors.right: favoriteButton.left
                 anchors.rightMargin: Style.spacing.sm
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: Style.space(9)
-                text: RadioModel.stationMeta(stationRow.modelData)
-                  + (RadioModel.compactTags(stationRow.modelData.tags, 2)
-                    ? "  ·  " + RadioModel.compactTags(stationRow.modelData.tags, 2) : "")
+                text: stationRow.isTrack
+                  ? [stationRow.modelData.connectorLabel, stationRow.modelData.artist, stationRow.modelData.album,
+                      stationRow.modelData.year].filter(function(value) { return value }).join("  ·  ")
+                  : RadioModel.stationMeta(stationRow.modelData)
+                    + (RadioModel.compactTags(stationRow.modelData.tags, 2)
+                      ? "  ·  " + RadioModel.compactTags(stationRow.modelData.tags, 2) : "")
                 textFormat: Text.PlainText
                 color: root.dim
                 font.family: Style.font.menuFamily
@@ -1692,6 +1982,7 @@ Item {
 
               Button {
                 id: favoriteButton
+                visible: !stationRow.isTrack
                 anchors.right: parent.right
                 anchors.rightMargin: Style.spacing.sm
                 anchors.verticalCenter: parent.verticalCenter
@@ -1706,7 +1997,7 @@ Item {
               MouseArea {
                 id: rowMouse
                 anchors.left: parent.left
-                anchors.right: favoriteButton.left
+                anchors.right: stationRow.isTrack ? parent.right : favoriteButton.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
                 hoverEnabled: true
@@ -1744,7 +2035,7 @@ Item {
             Text {
               anchors.centerIn: parent
               visible: root.fetching && root.remoteMode && root.displayStations.length === 0
-              text: "LOADING STATIONS"
+              text: "LOADING " + root.stationNoun.toUpperCase()
               textFormat: Text.PlainText
               color: root.dim
               font.family: Style.font.menuFamily
@@ -1795,10 +2086,12 @@ Item {
               text: root.playerError
                 ? root.playerError
                 : root.streamError ? root.streamError + ". Play to retry, or Next."
-                : (!root.playerRunning ? "Choose a signal to begin"
+                : (!root.playerRunning ? (root.albumMode ? "Choose an album to begin" : "Choose a signal to begin")
                 : (root.trackLine ? root.trackLine + "  ·  " : "")
-                  + (root.playerPaused ? "Paused" : "Live")
-                  + (root.playlistCount > 1 ? "  ·  " + root.playlistCount + " stations queued" : ""))
+                  + (root.playerPaused ? "Paused" : (root.playingTrack ? "Playing" : "Live"))
+                  + (root.playlistCount > 1 ? "  ·  " + root.playlistCount
+                    + (root.playingTrack ? " tracks queued"
+                      : root.playingTv ? " channels queued" : " stations queued") : ""))
               textFormat: Text.PlainText
               color: root.playerError || root.streamError ? root.urgent : root.dim
               font.family: Style.font.menuFamily
@@ -1810,7 +2103,8 @@ Item {
               id: identifyButton
               anchors.right: playingFavoriteButton.left
               anchors.top: playingFavoriteButton.top
-              visible: root.playerRunning && root.playingStationUuid !== ""
+              visible: root.playerRunning && root.playingStationUuid !== "" && !root.playingTrack
+                && !root.playingTv
               iconText: root.identifying ? "\uf130" : "\uf001"
               tooltipText: root.identifying ? "Listening…" : "Identify the playing song"
               enabled: !root.identifying && !root.playerPaused
@@ -1828,7 +2122,7 @@ Item {
               anchors.rightMargin: Style.spacing.sm
               anchors.top: parent.top
               anchors.topMargin: Style.spacing.sm
-              visible: root.playerRunning && root.playingStationUuid !== ""
+              visible: root.playerRunning && root.playingStationUuid !== "" && !root.playingTrack
               iconText: root.isFavorite(root.playingStationUuid) ? "\uf005" : "\uf006"
               tooltipText: root.isFavorite(root.playingStationUuid)
                 ? "Remove playing station from favorites"
@@ -1851,7 +2145,7 @@ Item {
 
               Button {
                 iconText: "\uf048"
-                tooltipText: "Previous station"
+                tooltipText: root.playingTrack ? "Previous track" : "Previous station"
                 enabled: root.playerRunning && !root.playerActionBusy
                 focusable: true
                 foreground: root.foreground
@@ -1860,7 +2154,7 @@ Item {
               }
               Button {
                 iconText: root.playerRunning && !root.playerPaused ? "\uf04c" : "\uf04b"
-                tooltipText: root.streamError ? "Retry station"
+                tooltipText: root.streamError ? (root.playingTrack ? "Retry track" : "Retry station")
                   : root.playerRunning && !root.playerPaused ? "Pause" : "Play"
                 enabled: !root.playerActionBusy
                 focusable: true
@@ -1870,7 +2164,7 @@ Item {
               }
               Button {
                 iconText: "\uf051"
-                tooltipText: "Next station"
+                tooltipText: root.playingTrack ? "Next track" : "Next station"
                 enabled: root.playerRunning && !root.playerActionBusy
                 focusable: true
                 foreground: root.foreground
@@ -2070,7 +2364,7 @@ Item {
         visible: root.helpVisible
         z: 2
         Accessible.role: Accessible.Pane
-        Accessible.name: "Radio Atlas controls"
+        Accessible.name: "Tocador controls"
 
         Rectangle {
           anchors.fill: parent

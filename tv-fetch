@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+"""Live TV channels from iptv-org and live YouTube subscriptions, shaped like Radio Browser station rows."""
+
+import fcntl
+import hashlib
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+API = "https://iptv-org.github.io/api"
+MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024
+MAX_CATALOG_ROWS = 20000
+WORLD_ROWS = 5000
+CATALOG_MAX_AGE = 24 * 60 * 60
+UUID_PATTERN = re.compile(r"^[0-9A-Fa-f-]{20,64}$")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+YOUTUBE = "https://www.youtube.com"
+YOUTUBE_MAX_AGE = 3 * 60
+CHANNEL_ID = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
+
+script_dir = Path(__file__).resolve().parent
+cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "omarchy-radio-atlas"
+catalog_file = cache_dir / "tv.json"
+lock_file = cache_dir / "tv.lock"
+youtube_file = cache_dir / "youtube-live.json"
+connectors_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "connectors.json"
+version = json.loads((script_dir / "manifest.json").read_text()).get("version", "0")
+user_agent = f"Radio Atlas/{version} (https://github.com/belisards/tocador-widget)"
+
+# Places too small for the 110m globe, placed on their capital instead.
+FALLBACK_COORDINATES = {
+    "AD": (42.51, 1.52), "AG": (17.12, -61.85), "AI": (18.22, -63.06),
+    "AS": (-14.28, -170.70), "AW": (12.52, -69.97), "BB": (13.10, -59.62),
+    "BH": (26.23, 50.59), "BL": (17.90, -62.85), "BM": (32.30, -64.78),
+    "BQ": (12.15, -68.27), "CV": (14.93, -23.51), "CW": (12.12, -68.93),
+    "DM": (15.30, -61.39), "FO": (62.01, -6.77), "GD": (12.05, -61.75),
+    "GF": (4.94, -52.33), "GG": (49.45, -2.54), "GI": (36.14, -5.35),
+    "GP": (16.24, -61.53), "GU": (13.47, 144.75), "HK": (22.32, 114.17),
+    "IM": (54.15, -4.48), "JE": (49.19, -2.11), "KI": (1.45, 172.98),
+    "KM": (-11.70, 43.26), "KN": (17.30, -62.72), "KY": (19.29, -81.37),
+    "LC": (14.01, -60.99), "LI": (47.14, 9.52), "MC": (43.74, 7.42),
+    "MF": (18.07, -63.08), "MO": (22.20, 113.54), "MP": (15.21, 145.75),
+    "MQ": (14.61, -61.07), "MS": (16.71, -62.22), "MT": (35.90, 14.51),
+    "MU": (-20.16, 57.50), "MV": (4.18, 73.51), "PF": (-17.54, -149.57),
+    "PM": (46.78, -56.18), "RE": (-20.88, 55.45), "SC": (-4.62, 55.45),
+    "SG": (1.35, 103.82), "SM": (43.94, 12.45), "ST": (0.34, 6.73),
+    "SX": (18.03, -63.05), "TC": (21.46, -71.14), "TO": (-21.14, -175.20),
+    "VA": (41.90, 12.45), "VC": (13.16, -61.23), "VG": (18.43, -64.62),
+    "VI": (18.34, -64.93), "WS": (-13.83, -171.76), "YT": (-12.78, 45.23),
+}
+
+
+def clean(value, limit):
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"  +", " ", CONTROL.sub(" ", value)).strip()[:limit]
+
+
+def station_uuid(channel_id, namespace="iptv-org"):
+    digest = hashlib.sha256(f"{namespace}\0{channel_id}".encode()).hexdigest()
+    return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+
+
+def download(name, directory):
+    target = Path(directory) / f"{name}.json"
+    subprocess.run(
+        ["curl", "--fail", "--silent", "--show-error", "--location",
+         "--connect-timeout", "5", "--max-time", "90", "--retry", "1",
+         "--max-filesize", str(MAX_DOWNLOAD_BYTES), "--proto", "=https",
+         "--proto-redir", "=https", "--user-agent", user_agent,
+         "--output", str(target), f"{API}/{name}.json"],
+        check=True, stdin=subprocess.DEVNULL,
+    )
+    if target.stat().st_size > MAX_DOWNLOAD_BYTES:
+        raise ValueError(f"{name}.json is too large")
+    with open(target) as handle:
+        data = json.load(handle)
+    if not isinstance(data, list):
+        raise ValueError(f"{name}.json is not a list")
+    return data
+
+
+def quality_height(stream):
+    match = re.match(r"^(\d{3,4})[pi]$", str(stream.get("quality") or ""))
+    return min(int(match.group(1)), 1080) if match else 0
+
+
+def stream_rank(stream):
+    labels = stream.get("labels") or []
+    return (
+        "Geo-blocked" not in labels,
+        "Not 24/7" not in labels,
+        not stream.get("feed"),
+        not stream.get("user_agent") and not stream.get("referrer"),
+        str(stream.get("url", "")).lower().startswith("https://"),
+        quality_height(stream),
+    )
+
+
+def globe_codes():
+    try:
+        with open(script_dir / "assets" / "countries.json") as handle:
+            features = json.load(handle).get("features", [])
+        return {str(feature["properties"]["code"]).upper() for feature in features}
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+
+
+def build_rows(channels, streams, blocklist, countries):
+    by_id = {row.get("id"): row for row in channels if isinstance(row, dict)}
+    blocked = {row.get("channel") for row in blocklist if isinstance(row, dict)}
+    country_names = {row.get("code"): row.get("name") for row in countries if isinstance(row, dict)}
+    mapped = globe_codes()
+
+    best = {}
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        channel = by_id.get(stream.get("channel"))
+        url = stream.get("url")
+        if (not channel or channel.get("is_nsfw") or channel.get("closed")
+                or channel.get("id") in blocked or not isinstance(url, str)
+                or not re.match(r"^https?://", url, re.I) or CONTROL.search(url)
+                or len(url) > 2048):
+            continue
+        current = best.get(channel["id"])
+        if current is None or stream_rank(stream) > stream_rank(current):
+            best[channel["id"]] = stream
+
+    rows = []
+    for channel_id, stream in best.items():
+        channel = by_id[channel_id]
+        source_code = clean(channel.get("country"), 2).upper()
+        code = "GB" if source_code == "UK" else source_code
+        uuid = station_uuid(channel_id)
+        latitude = longitude = None
+        if code not in mapped and code in FALLBACK_COORDINATES:
+            # Spread channels around the capital so their signals stay clickable.
+            spread = int(uuid[:8], 16)
+            latitude = round(FALLBACK_COORDINATES[code][0] + ((spread & 0xFF) / 255 - 0.5) * 0.6, 4)
+            longitude = round(FALLBACK_COORDINATES[code][1] + ((spread >> 8 & 0xFF) / 255 - 0.5) * 0.6, 4)
+        labels = [label.lower() for label in stream.get("labels") or [] if isinstance(label, str)]
+        categories = [value for value in channel.get("categories") or [] if isinstance(value, str)]
+        rows.append({
+            "uuid": uuid,
+            "name": clean(channel.get("name"), 160) or "Unknown channel",
+            "url": stream["url"],
+            "homepage": clean(channel.get("website"), 2048),
+            "favicon": "",
+            "country": clean(country_names.get(source_code) or code, 100),
+            "countryCode": code,
+            "state": "",
+            "language": "",
+            "tags": clean(",".join(categories + labels), 500),
+            "network": clean(channel.get("network"), 160),
+            "codec": clean(stream.get("quality"), 32),
+            "bitrate": 0,
+            "votes": 0,
+            "clicks": 0,
+            "latitude": latitude,
+            "longitude": longitude,
+            "kind": "tv",
+            "provider": "iptv-org",
+            "userAgent": clean(stream.get("user_agent"), 512),
+            "referrer": clean(stream.get("referrer"), 2048),
+        })
+
+    # Working 24/7 channels first; the uuid order interleaves countries.
+    rows.sort(key=lambda row: ("geo-blocked" in row["tags"], "not 24/7" in row["tags"], row["uuid"]))
+    return rows[:MAX_CATALOG_ROWS]
+
+
+def valid_catalog(rows):
+    return (isinstance(rows, list) and 0 < len(rows) <= MAX_CATALOG_ROWS
+            and all(isinstance(row, dict) and UUID_PATTERN.match(str(row.get("uuid", "")))
+                    for row in rows))
+
+
+def read_catalog():
+    try:
+        if catalog_file.stat().st_size > MAX_DOWNLOAD_BYTES:
+            return None
+        with open(catalog_file) as handle:
+            rows = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return rows if valid_catalog(rows) else None
+
+
+def refresh_catalog():
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(lock_file, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if catalog_fresh() and read_catalog() is not None:
+            return
+        with tempfile.TemporaryDirectory(dir=cache_dir, prefix="tv-download.") as directory:
+            rows = build_rows(
+                download("channels", directory), download("streams", directory),
+                download("blocklist", directory), download("countries", directory))
+            if not valid_catalog(rows):
+                raise ValueError("TV catalog is empty")
+            temporary = Path(directory) / "tv.json"
+            temporary.write_text(json.dumps(rows, separators=(",", ":")))
+            os.replace(temporary, catalog_file)
+
+
+def catalog_fresh():
+    try:
+        return time.time() - catalog_file.stat().st_mtime < CATALOG_MAX_AGE
+    except OSError:
+        return False
+
+
+def refresh_in_background():
+    subprocess.Popen(
+        [sys.executable, __file__, "refresh"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def load_catalog():
+    rows = read_catalog()
+    if rows is None:
+        refresh_catalog()
+        rows = read_catalog()
+        if rows is None:
+            raise ValueError("TV catalog is unavailable")
+    elif not catalog_fresh():
+        refresh_in_background()
+    return rows
+
+
+def youtube_auth_path():
+    try:
+        connectors = json.loads(connectors_file.read_text()).get("connectors", [])
+    except (OSError, ValueError, AttributeError):
+        return None
+    for row in connectors:
+        if (isinstance(row, dict) and row.get("type") == "youtube-subscriptions"
+                and row.get("enabled", True) and row.get("auth")):
+            return Path(str(row["auth"])).expanduser()
+    return None
+
+
+def youtube_request(url, headers, body=None):
+    request = urllib.request.Request(url, data=body, headers=headers)
+    with urllib.request.urlopen(request, timeout=10) as response:
+        data = response.read(MAX_DOWNLOAD_BYTES + 1)
+    if len(data) > MAX_DOWNLOAD_BYTES:
+        raise ValueError("YouTube response is too large")
+    return data
+
+
+def youtube_authorization(cookies, user, origin):
+    now = str(int(time.time()))
+    parts = []
+    for scheme, name in (("SAPISIDHASH", "SAPISID"), ("SAPISID1PHASH", "__Secure-1PAPISID"),
+                         ("SAPISID3PHASH", "__Secure-3PAPISID")):
+        if not cookies.get(name):
+            continue
+        signed = " ".join(([user] if user else []) + [now, cookies[name], origin])
+        digest = hashlib.sha1(signed.encode()).hexdigest()
+        parts.append(f"{scheme} {now}_{digest}" + ("_u" if user else ""))
+    return " ".join(parts)
+
+
+def youtube_guide(auth):
+    """Signed-in sidebar guide, which flags subscriptions that are live now."""
+    cookie = auth["Cookie"]
+    agent = auth.get("User-Agent") or user_agent
+    page = youtube_request(YOUTUBE + "/", {"Cookie": cookie, "User-Agent": agent})
+    config = json.loads(re.search(rb"ytcfg\.set\((\{.*?\})\);", page).group(1))
+    if not config.get("LOGGED_IN"):
+        raise PermissionError("YouTube session is signed out")
+    cookies = dict(part.strip().split("=", 1) for part in cookie.split(";") if "=" in part)
+    user = str(config.get("DATASYNC_ID") or "").split("||")[0]
+    context = config["INNERTUBE_CONTEXT"]
+    headers = {
+        "Cookie": cookie, "User-Agent": agent, "Content-Type": "application/json",
+        "Authorization": youtube_authorization(cookies, user, YOUTUBE),
+        "Origin": YOUTUBE, "X-Origin": YOUTUBE, "X-Goog-AuthUser": "0",
+        "X-Goog-Visitor-Id": context["client"].get("visitorData", ""),
+        "X-Youtube-Bootstrap-Logged-In": "true", "X-Youtube-Client-Name": "1",
+        "X-Youtube-Client-Version": config["INNERTUBE_CLIENT_VERSION"],
+    }
+    body = json.dumps({"context": context}).encode()
+    return json.loads(youtube_request(YOUTUBE + "/youtubei/v1/guide?prettyPrint=false", headers, body))
+
+
+def youtube_live_channels(guide):
+    entries, pending = [], [guide]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if isinstance(node.get("guideEntryRenderer"), dict):
+                entries.append(node["guideEntryRenderer"])
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+
+    rows, seen = [], set()
+    for entry in entries:
+        channel_id = (entry.get("navigationEndpoint") or {}).get("browseEndpoint", {}).get("browseId", "")
+        if (not (entry.get("badges") or {}).get("liveBroadcasting")
+                or not CHANNEL_ID.match(str(channel_id)) or channel_id in seen):
+            continue
+        seen.add(channel_id)
+        thumbnails = (entry.get("thumbnail") or {}).get("thumbnails") or [{}]
+        thumbnail = str(thumbnails[-1].get("url", ""))
+        rows.append({
+            "uuid": station_uuid(channel_id, "youtube"),
+            "name": clean((entry.get("formattedTitle") or {}).get("simpleText"), 160) or "YouTube live",
+            "url": f"{YOUTUBE}/channel/{channel_id}/live",
+            "homepage": f"{YOUTUBE}/channel/{channel_id}",
+            "favicon": ("https:" + thumbnail if thumbnail.startswith("//") else thumbnail)[:2048],
+            "country": "", "countryCode": "", "state": "", "language": "",
+            "tags": "youtube,live now", "network": "", "codec": "YouTube",
+            "bitrate": 0, "votes": 0, "clicks": 0, "latitude": None, "longitude": None,
+            "kind": "tv", "provider": "youtube", "userAgent": "", "referrer": "",
+        })
+    return rows
+
+
+def cached_youtube_rows(max_age=None):
+    try:
+        if max_age is not None and time.time() - youtube_file.stat().st_mtime >= max_age:
+            return None
+        rows = json.loads(youtube_file.read_text())
+    except (OSError, ValueError):
+        return None
+    return rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else None
+
+
+def youtube_live_rows():
+    auth_path = youtube_auth_path()
+    if auth_path is None:
+        return []
+    rows = cached_youtube_rows(YOUTUBE_MAX_AGE)
+    if rows is not None:
+        return rows
+    try:
+        with open(auth_path) as handle:
+            rows = youtube_live_channels(youtube_guide(json.load(handle)))
+    except Exception as error:
+        # Subscriptions are optional; an expired session must not hide TV.
+        print(f"YouTube subscriptions are unavailable: {type(error).__name__}", file=sys.stderr)
+        return []
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile("w", dir=cache_dir, prefix="youtube.", delete=False) as handle:
+        json.dump(rows, handle, separators=(",", ":"))
+    os.replace(handle.name, youtube_file)
+    return rows
+
+
+def country_rows(rows, code):
+    code = "GB" if code == "UK" else code
+    return [row for row in rows if row.get("countryCode") == code][:500]
+
+
+def search_rows(rows, query):
+    wanted = query.casefold()
+    ranked = []
+    for row in rows:
+        name = str(row.get("name", "")).casefold()
+        if name.startswith(wanted):
+            rank = 0
+        elif wanted in name:
+            rank = 1
+        elif any(wanted in str(row.get(field, "")).casefold()
+                 for field in ("country", "countryCode", "tags", "network")):
+            rank = 2
+        else:
+            continue
+        ranked.append((rank, len(ranked), row))
+    return [row for _, _, row in sorted(ranked)][:200]
+
+
+def random_rows(rows, exclusions):
+    excluded = set(exclusions)
+    fresh = [row for row in rows if row["uuid"] not in excluded
+             and "geo-blocked" not in row.get("tags", "")]
+    return random.sample(fresh or rows, min(60, len(fresh or rows)))
+
+
+def fail(message, code=2):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def main():
+    os.umask(0o077)
+    action = sys.argv[1] if len(sys.argv) > 1 else "world"
+    value = sys.argv[2] if len(sys.argv) > 2 else ""
+
+    if action == "refresh":
+        refresh_catalog()
+        return
+    if action == "world-more":
+        print("[]")
+        return
+
+    if action == "country" and not re.match(r"^[A-Za-z]{2}$", value):
+        fail("Country code must contain two letters")
+    if action == "search" and (not value.strip() or len(value) > 128):
+        fail("Search text is empty or too long")
+    ids = [part for part in value.split(",") if part]
+    if action in ("random", "resolve") and (
+            len(value) > 4096 or not all(UUID_PATTERN.match(part) for part in ids)):
+        fail("Invalid channel ids")
+    if action not in ("world", "country", "search", "random", "resolve"):
+        fail(f"Unknown action: {action}")
+
+    try:
+        rows = load_catalog()
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        fail(f"TV channel service is unavailable: {type(error).__name__}", 1)
+
+    if action == "world":
+        live = youtube_live_rows()
+        output = live + rows[:WORLD_ROWS - len(live)]
+    elif action == "country":
+        output = country_rows(rows, value.upper())
+    elif action == "search":
+        output = search_rows(youtube_live_rows() + rows, value.strip())
+    elif action == "random":
+        output = random_rows(rows, ids)
+    else:
+        wanted = set(ids)
+        output = [row for row in (cached_youtube_rows() or []) + rows if row["uuid"] in wanted]
+    print(json.dumps(output, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    main()

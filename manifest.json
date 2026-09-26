@@ -1,18 +1,23 @@
 {
   "schemaVersion": 1,
   "id": "akshar.radio-atlas",
-  "name": "Radio Atlas",
-  "version": "0.1.9",
-  "author": "Akshar Patel",
+  "name": "Tocador",
+  "version": "0.2.0",
+  "author": "belisards and Akshar Patel",
   "license": "MIT",
-  "description": "Explore live radio on a rotatable globe and play stations through Omarchy's media controls.",
-  "homepage": "https://github.com/belisards/omarchy-radio-atlas",
-  "repository": "https://github.com/belisards/omarchy-radio-atlas",
+  "description": "Play world radio, live TV, Tocador archives, and your own albums in one integrated Omarchy media player.",
+  "homepage": "https://github.com/belisards/tocador-widget",
+  "repository": "https://github.com/belisards/tocador-widget",
   "keywords": [
     "radio",
     "world",
     "globe",
     "music",
+    "albums",
+    "tocador",
+    "nextcloud",
+    "tv",
+    "iptv",
     "mpris"
   ],
   "kinds": [
@@ -25,10 +30,10 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Radio Atlas",
-    "description": "Open the world radio globe",
+    "displayName": "Tocador",
+    "description": "Open radio, TV, albums, and connected music folders",
     "category": "Media",
     "allowMultiple": false,
-    "defaultSection": "left"
+    "defaultSection": "center"
   }
 }
