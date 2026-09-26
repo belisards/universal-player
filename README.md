@@ -1,12 +1,10 @@
 # Universal Player
 
 > One Omarchy media player for world radio, embedded IPTV, YouTube, independent music archives,
-> and your own albums. Forked from
-> [AksharP5/omarchy-radio-atlas](https://github.com/AksharP5/omarchy-radio-atlas).
+> and your own albums.
 
-Universal Player started as Radio Atlas, a live-radio globe, and grew into a
-connector-based player. Four tabs share one window, one search box, one Random
-button, and one `mpv` queue that shows up in Omarchy's media controls:
+Every source shares one window, one search box, one Random button, and one `mpv`
+queue that shows up in Omarchy's media controls:
 
 - **Radio**: about 50,000 stations from Radio Browser on a rotatable globe
 - **IPTV**: about 10,000 free channels from iptv-org, rendered inside the globe canvas
@@ -19,7 +17,7 @@ Quickshell UI components, so it needs Omarchy and won't run on a plain Hyprland 
 
 ![Universal Player showing live TV channels across the globe](preview.png)
 
-## What Universal Player adds
+## Highlights
 
 - **IPTV on the globe.** iptv-org channels are placed by country and play directly inside
   the main globe canvas with the same transport controls as radio.
@@ -41,7 +39,7 @@ Quickshell UI components, so it needs Omarchy and won't run on a plain Hyprland 
 - **One control surface.** Radio, music, embedded IPTV, and YouTube share the Tocador
   transport controls; IPTV stays inside the main window.
 
-## Inherited from Radio Atlas
+## More features
 
 - Kinetic drag rotation that highlights a nearby station when it settles, plus deep wheel zoom on a theme-aware globe
 - A fast cached world view that progressively adds thousands of stations and keeps the session catalog when closed
@@ -288,6 +286,24 @@ removing it.
 <a href="https://www.greptile.com/?utm_source=oss_badge&amp;utm_medium=readme&amp;utm_campaign=greptile_for_open_source">
   <img src="https://www.greptile.com/badge.svg" alt="Greptile: The War on Bugs" width="100%">
 </a>
+
+## Built upon
+
+Universal Player grew out of
+[Radio Atlas](https://github.com/AksharP5/omarchy-radio-atlas) by Akshar Patel, which
+contributed the globe, radio browsing, favorites, history, audio outputs, and the
+sandboxed player. It also stands on:
+
+- [Tocador](https://tocador.cc/), with the UQT and Hominis Canidae archives
+- [Omarchy](https://omarchy.org), [Hyprland](https://hyprland.org), and [Quickshell](https://quickshell.org) with Qt Quick
+- [mpv](https://mpv.io) and `mpv-mpris` for playback and media controls
+- [Radio Browser](https://www.radio-browser.info/) for radio stations
+- [iptv-org](https://github.com/iptv-org/iptv) for TV channels
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) and the [ytmusicapi](https://ytmusicapi.readthedocs.io/) auth format for YouTube
+- [SongRec](https://github.com/marin-m/SongRec) for song identification
+- [PipeWire](https://pipewire.org) for audio outputs and AirPlay
+- [bubblewrap](https://github.com/containers/bubblewrap) for the playback sandbox
+- [Natural Earth](https://www.naturalearthdata.com/) for map geometry
 
 ## Development
 
