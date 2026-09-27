@@ -90,8 +90,17 @@ IPTV uses QtMultimedia to render directly inside the main globe canvas. The
 sidebar, queue, volume, pause, previous, next, and stop controls stay in the
 same window; IPTV does not open a second video window.
 
-If a community channel is broken, use **Not working? Remove this channel** in
-the video error overlay. Restore every channel later with `./tv-health restore all`.
+Community streams go offline constantly. `./tv-health check` probes every IPTV
+stream (playlist, first variant and first segment, with one retry) and hides the
+dead ones from the globe, search and Random; the next check brings back any that
+recover. Results live in `~/.cache/omarchy-radio-atlas/tv-health.json`, and a
+check that fails almost everywhere is treated as a network problem and discarded.
+Run it weekly with a systemd user timer whose service executes
+`tv-health check`.
+
+If a channel still fails, use **Not working? Remove this channel** in the video
+error overlay. Restore every removed channel with `./tv-health restore all`, and
+list dead and removed channels with `./tv-health status -v`.
 
 ### Live YouTube subscriptions
 

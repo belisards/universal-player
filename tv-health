@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hide and restore IPTV channels selected by the user."""
+"""Probe iptv-org streams, remember which ones are dead, and keep a list of channels the user removed."""
 
 import argparse
 import fcntl
@@ -9,38 +9,207 @@ import re
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 UUID_PATTERN = re.compile(r"^[0-9A-Fa-f-]{20,64}$")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+PROBE_TIMEOUT = 8
+PROBE_BYTES = 256 * 1024
+MIN_HEALTHY_SHARE = 0.05
+DEFAULT_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+
+cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "omarchy-radio-atlas"
 config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas"
+catalog_file = cache_dir / "tv.json"
+health_file = cache_dir / "tv-health.json"
 removed_file = config_dir / "tv-removed.json"
 
 
-def read_removed():
+def read_json(path, default):
     try:
-        data = json.loads(removed_file.read_text())
+        with open(path) as handle:
+            data = json.load(handle)
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return default
+    return data if isinstance(data, type(default)) else default
 
 
-def write_removed(data):
-    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile("w", dir=config_dir, prefix="tv-removed.json.", delete=False) as handle:
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name + ".", delete=False) as handle:
         json.dump(data, handle, separators=(",", ":"))
-        temporary = handle.name
-    os.replace(temporary, removed_file)
+    os.replace(handle.name, path)
 
 
 def update_removed(change):
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(config_dir / "tv-removed.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        removed = read_removed()
+        removed = read_json(removed_file, {})
         change(removed)
-        write_removed(removed)
+        write_json(removed_file, removed)
     return removed
+
+
+class ProbeError(Exception):
+    pass
+
+
+def fetch(url, row, limit, byte_range=False):
+    if not re.match(r"^https?://", url, re.I) or CONTROL.search(url):
+        raise ProbeError("bad-url")
+    headers = {"User-Agent": row.get("userAgent") or DEFAULT_AGENT, "Accept": "*/*",
+               "Accept-Encoding": "identity"}
+    if row.get("referrer"):
+        headers["Referer"] = row["referrer"]
+    if byte_range:
+        headers["Range"] = f"bytes=0-{limit - 1}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
+            return response.read(limit), response.headers.get("Content-Type", ""), response.geturl()
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise ProbeError(f"http {error.code}")
+    except urllib.error.URLError as error:
+        reason = str(error.reason).lower()
+        raise ProbeError("dns" if "name or service" in reason or "resolution" in reason
+                         else "timeout" if "timed out" in reason else "connect")
+    except TimeoutError:
+        raise ProbeError("timeout")
+    except (OSError, ValueError):
+        raise ProbeError("connect")
+
+
+def decode_text(body):
+    if body[:2] == b"\x1f\x8b":
+        try:
+            body = zlib.decompressobj(31).decompress(body)
+        except zlib.error:
+            pass
+    return body.decode("utf-8", "replace")
+
+
+def playlist_lines(text):
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def first_uri(lines, after_tag=None):
+    take = after_tag is None
+    for line in lines:
+        if after_tag and line.startswith(after_tag):
+            take = True
+        elif take and not line.startswith("#"):
+            return line
+    return None
+
+
+def probe_once(row):
+    body, content_type, final = fetch(row["url"], row, PROBE_BYTES)
+    text = decode_text(body)
+    if "<mpd" in text[:4096].lower():
+        return
+    if not text.lstrip("﻿ \r\n").startswith("#EXTM3U"):
+        if "html" in content_type.lower() or text.lstrip()[:1] == "<":
+            raise ProbeError("not-a-stream")
+        if not body:
+            raise ProbeError("empty")
+        return
+
+    lines = playlist_lines(text)
+    if any(line.startswith("#EXT-X-STREAM-INF") for line in lines):
+        variant = first_uri(lines, "#EXT-X-STREAM-INF")
+        if not variant:
+            raise ProbeError("empty-playlist")
+        body, _, final = fetch(urllib.parse.urljoin(final, variant), row, PROBE_BYTES)
+        text = decode_text(body)
+        if not text.lstrip("﻿ \r\n").startswith("#EXTM3U"):
+            raise ProbeError("bad-variant")
+        lines = playlist_lines(text)
+
+    segment = first_uri(lines, "#EXTINF")
+    if segment is None:
+        map_line = next((line for line in lines if line.startswith("#EXT-X-MAP")), "")
+        match = re.search(r'URI="([^"]+)"', map_line)
+        segment = match.group(1) if match else None
+    if segment is None:
+        raise ProbeError("empty-playlist")
+    data, segment_type, _ = fetch(urllib.parse.urljoin(final, segment), row, 2048, byte_range=True)
+    if not data:
+        raise ProbeError("empty-segment")
+    if "html" in segment_type.lower() or data.lstrip()[:1] == b"<":
+        raise ProbeError("segment-not-media")
+
+
+def probe(row):
+    """One retry so a hiccup does not condemn a working channel."""
+    for attempt in range(2):
+        try:
+            probe_once(row)
+            return True, ""
+        except ProbeError as error:
+            reason = str(error)
+        except Exception as error:
+            reason = type(error).__name__
+        if attempt == 0:
+            time.sleep(1.5)
+    return False, reason
+
+
+def check(args):
+    rows = read_json(catalog_file, [])
+    rows = [row for row in rows if isinstance(row, dict) and row.get("provider") == "iptv-org"
+            and UUID_PATTERN.match(str(row.get("uuid", "")))]
+    if args.country:
+        rows = [row for row in rows if row.get("countryCode") == args.country.upper()]
+    if args.limit:
+        rows = rows[:args.limit]
+    if not rows:
+        print("No IPTV channels in the catalog. Open Universal Player once to download it.", file=sys.stderr)
+        return 1
+
+    results, started = {}, time.time()
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(probe, row): row for row in rows}
+        for done, future in enumerate(as_completed(futures), 1):
+            results[futures[future]["uuid"]] = future.result()
+            if done % 100 == 0 or done == len(rows):
+                alive = sum(1 for ok, _ in results.values() if ok)
+                print(f"\r{done}/{len(rows)} checked · {alive} alive · {int(time.time() - started)}s",
+                      end="", file=sys.stderr, flush=True)
+    print(file=sys.stderr)
+
+    alive = sum(1 for ok, _ in results.values() if ok)
+    if alive < len(results) * MIN_HEALTHY_SHARE:
+        print("Almost every stream failed, which looks like a network problem. Nothing was saved.",
+              file=sys.stderr)
+        return 1
+
+    now = int(time.time())
+    health = read_json(health_file, {})
+    for uuid, (ok, reason) in results.items():
+        health[uuid] = {"ok": ok, "at": now, "reason": reason}
+    known = {row["uuid"] for row in read_json(catalog_file, []) if isinstance(row, dict) and "uuid" in row}
+    health = {uuid: entry for uuid, entry in health.items() if uuid in known}
+    write_json(health_file, health)
+
+    reasons = {}
+    for ok, reason in results.values():
+        if not ok:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    breakdown = ", ".join(f"{reason} {count}" for reason, count in sorted(reasons.items(), key=lambda item: -item[1]))
+    print(f"{alive} alive, {len(results) - alive} dead ({breakdown or 'none'})")
+    return 0
+
+
+def dead_uuids():
+    return {uuid for uuid, entry in read_json(health_file, {}).items()
+            if isinstance(entry, dict) and entry.get("ok") is False}
 
 
 def remove(args):
@@ -61,12 +230,20 @@ def restore(args):
 
 
 def listing(args):
-    removed = read_removed()
-    print(f"{len(removed)} channel(s) removed by you")
+    names = {row.get("uuid"): row for row in read_json(catalog_file, []) if isinstance(row, dict)}
+    health = read_json(health_file, {})
+    dead = sorted(dead_uuids())
+    removed = read_json(removed_file, {})
+    checked = max((entry.get("at", 0) for entry in health.values() if isinstance(entry, dict)), default=0)
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(checked)) if checked else "never"
+    print(f"Last check: {when} · {len(health)} probed · {len(dead)} dead · {len(removed)} channel(s) removed by you")
     if args.verbose:
+        for uuid in dead:
+            row = names.get(uuid, {})
+            print(f"dead     {uuid}  {row.get('countryCode', '--')}  {row.get('name', '?')}  [{health[uuid].get('reason')}]")
         for uuid, entry in sorted(removed.items()):
             name = entry.get("name", "?") if isinstance(entry, dict) else "?"
-            print(f"{uuid}  {name}")
+            print(f"removed  {uuid}  --  {name}")
     return 0
 
 
@@ -74,16 +251,26 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+
+    probe_parser = commands.add_parser("check", help="probe every IPTV stream and record the dead ones")
+    probe_parser.add_argument("--country", help="only probe this two-letter country code")
+    probe_parser.add_argument("--limit", type=int, help="probe at most this many channels")
+    probe_parser.add_argument("--workers", type=int, default=48)
+    probe_parser.set_defaults(run=check)
+
     remove_parser = commands.add_parser("remove", help="hide a channel until it is restored")
     remove_parser.add_argument("uuid")
     remove_parser.add_argument("name", nargs="?", default="")
     remove_parser.set_defaults(run=remove)
+
     restore_parser = commands.add_parser("restore", help="show a removed channel again, or 'all'")
     restore_parser.add_argument("uuid")
     restore_parser.set_defaults(run=restore)
-    status_parser = commands.add_parser("status", help="list channels you removed")
+
+    status_parser = commands.add_parser("status", help="summarise the last check and your removals")
     status_parser.add_argument("-v", "--verbose", action="store_true")
     status_parser.set_defaults(run=listing)
+
     args = parser.parse_args()
     return args.run(args)
 

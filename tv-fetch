@@ -30,6 +30,7 @@ cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "
 catalog_file = cache_dir / "tv.json"
 lock_file = cache_dir / "tv.lock"
 youtube_file = cache_dir / "youtube-live.json"
+health_file = cache_dir / "tv-health.json"
 removed_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "tv-removed.json"
 connectors_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "connectors.json"
 version = json.loads((script_dir / "manifest.json").read_text()).get("version", "0")
@@ -226,12 +227,17 @@ def refresh_in_background():
 
 
 def hidden_uuids():
-    """Channels the user explicitly removed from normal catalog views."""
-    try:
-        data = json.loads(removed_file.read_text())
-    except (OSError, ValueError):
-        return set()
-    return set(data) if isinstance(data, dict) else set()
+    """Channels the last tv-health check found dead, plus the ones the user removed."""
+    hidden = set()
+    for path, dead_only in ((health_file, True), (removed_file, False)):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            hidden.update(uuid for uuid, entry in data.items()
+                          if not dead_only or (isinstance(entry, dict) and entry.get("ok") is False))
+    return hidden
 
 
 def load_catalog():
