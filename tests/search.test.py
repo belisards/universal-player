@@ -22,11 +22,18 @@ with tempfile.TemporaryDirectory(prefix="tocador-search-") as temporary:
     library = root / "library"
     archive = root / "archive"
     tv = root / "tv"
-    write_tool(tv, [
-        {"uuid": "tv-1", "provider": "iptv-org", "kind": "tv", "name": "Gil TV", "url": "https://tv.test/a.m3u8"},
-        {"uuid": "yt-1", "provider": "youtube", "kind": "tv", "name": "Gil Live",
-         "url": "https://www.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa/live"},
-    ])
+    tv.write_text("""#!/usr/bin/env python3
+import json, sys
+rows = [
+ {"uuid":"tv-1","provider":"iptv-org","kind":"tv","name":"Gil TV","url":"https://tv.test/a.m3u8"},
+ {"uuid":"yt-1","provider":"youtube","kind":"tv","name":"Gil Live","url":"https://www.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa/live"}
+]
+source = sys.argv[3] if len(sys.argv) > 3 else "all"
+print(json.dumps([row for row in rows if source == "all" or
+ (source == "youtube" and row["provider"] == "youtube") or
+ (source == "iptv" and row["provider"] == "iptv-org")]))
+""")
+    tv.chmod(0o755)
     write_tool(radio, [{"uuid": "radio-1", "name": "Gil Radio", "url": "https://radio.test/live"}])
     write_tool(library, [
         {"uuid": "local-1", "provider": "local", "source": "library", "kind": "track",
@@ -58,8 +65,10 @@ print(json.dumps([{"uuid": source + "-1", "provider": "tocador", "source": sourc
     rows = json.loads(process.stdout)
     assert [row["uuid"] for row in rows] == ["local-1", "homi-1", "uqt-1", "yt-1", "radio-1", "tv-1"], rows
     assert [row["connectorLabel"] for row in rows] == [
-        "MY MUSIC", "TOCADOR · HOMINIS", "TOCADOR · UQT", "TV · YOUTUBE", "RADIO", "TV"
+        "MY MUSIC", "TOCADOR · HOMINIS", "TOCADOR · UQT", "YOUTUBE", "RADIO", "IPTV"
     ]
+    assert next(row for row in rows if row["uuid"] == "yt-1")["source"] == "youtube"
+    assert next(row for row in rows if row["uuid"] == "tv-1")["source"] == "iptv"
     assert all(row["kind"] == "tv" for row in rows if row["uuid"] in ("tv-1", "yt-1"))
     assert "local-2" not in [row["uuid"] for row in rows]
 

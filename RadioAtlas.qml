@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls as QQC
+import QtMultimedia
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
@@ -36,6 +37,7 @@ Item {
   property string fetchCatalog: ""
   property string pendingFetchAction: ""
   property string pendingFetchValue: ""
+  property string pendingFetchCatalog: ""
   property string fetchError: ""
   property string fetchOutput: ""
   property string fetchStderr: ""
@@ -80,6 +82,7 @@ Item {
   readonly property bool playPreparing: playerActionProcess.running
     && playerActionProcess.action === "play"
   readonly property bool playerActionBusy: playerActionProcess.running || stopProcess.running
+    || embeddedStopProcess.running || embeddedRelayProcess.running
   property int playlistPosition: -1
   property int playlistCount: 0
   property string playerError: ""
@@ -87,6 +90,11 @@ Item {
   property bool localReloadPending: false
   property var pendingFavoriteRequests: []
   property string pendingRecentUuid: ""
+  property var embeddedStation: null
+  property var embeddedQueue: []
+  property int embeddedIndex: -1
+  property var pendingEmbeddedStation: null
+  property var pendingEmbeddedQueue: []
   property string albumSource: "library"
   property string albumError: ""
   property string universalSearchOutput: ""
@@ -94,9 +102,15 @@ Item {
 
   readonly property string fetchPath: Qt.resolvedUrl("radio-fetch").toString().replace(/^file:\/\//, "")
   readonly property string tvFetchPath: Qt.resolvedUrl("tv-fetch").toString().replace(/^file:\/\//, "")
-  readonly property bool tvCatalog: catalog === "tv"
+  readonly property string tvHealthPath: Qt.resolvedUrl("tv-health").toString().replace(/^file:\/\//, "")
+  readonly property bool iptvCatalog: catalog === "iptv"
+  readonly property bool youtubeCatalog: catalog === "youtube"
+  readonly property bool tvCatalog: iptvCatalog || youtubeCatalog
   readonly property string stationNoun: tvCatalog ? "channels" : "stations"
+  readonly property string catalogServiceName: iptvCatalog ? "The IPTV channel list"
+    : (youtubeCatalog ? "YouTube subscriptions" : "Radio Browser")
   readonly property string playerPath: Qt.resolvedUrl("radio-player").toString().replace(/^file:\/\//, "")
+  readonly property string videoRelayPath: Qt.resolvedUrl("radio-video-relay").toString().replace(/^file:\/\//, "")
   readonly property string searchPath: Qt.resolvedUrl("radio-search").toString().replace(/^file:\/\//, "")
   readonly property string statePath: Qt.resolvedUrl("radio-state").toString().replace(/^file:\/\//, "")
   readonly property string runtimePath: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-radio-atlas"
@@ -106,9 +120,23 @@ Item {
   readonly property string playSelectionPath: runtimePath + "/play-selection.json"
   readonly property string favoriteSelectionPath: runtimePath + "/favorite-selection.json"
 
-  readonly property var displayStations: mode === "favorites"
+  readonly property var unfilteredDisplayStations: mode === "favorites"
     ? favorites
     : (mode === "recent" ? recent : results)
+  property var viewportStationUuids: []
+  property bool viewportFilterReady: false
+  readonly property bool viewportFilterActive: viewportFilterReady
+    && !albumMode && catalog !== "youtube" && (mode === "world" || mode === "country")
+  readonly property var displayStations: {
+    var rows = unfilteredDisplayStations
+    if (!viewportFilterActive) return rows
+    var visible = ({})
+    for (var i = 0; i < viewportStationUuids.length; i++)
+      visible["$" + viewportStationUuids[i]] = true
+    return rows.filter(function(row) {
+      return row && visible["$" + String(row.uuid || "")] === true
+    })
+  }
   readonly property bool albumMode: mode === "albums"
   readonly property var albumCards: {
     var cards = []
@@ -128,7 +156,7 @@ Item {
     ? albumCards.length + " albums from your connected folders"
     : albumCards.length + " albums from UQT + Hominis Canidae"
   readonly property var currentGeoStations:
-    RadioModel.mergeGeoStations(worldStations, displayStations, countries)
+    RadioModel.mergeGeoStations(worldStations, unfilteredDisplayStations, countries)
   readonly property string playingStationName: playingStation
     ? String(playingStation.name || "").trim() : ""
   readonly property string playingTrackTitle: {
@@ -140,6 +168,7 @@ Item {
     || (identifying ? "Listening for the song…" : identifiedTrack)
   readonly property bool playingTrack: playingStation && playingStation.kind === "track"
   readonly property bool playingTv: playingStation && playingStation.kind === "tv"
+  readonly property bool embeddedVideoActive: embeddedStation !== null
 
   function applyIdentifyState(raw) {
     try {
@@ -209,7 +238,7 @@ Item {
         { input: "ENTER", action: "Play selected station" },
         { input: "SPACE", action: "Play or pause" },
         { input: "R", action: "Play something random" },
-        { input: "T", action: "Switch between radio and TV" },
+        { input: "T", action: "Cycle Radio, IPTV, and YouTube" },
         { input: "F", action: "Favorite selected station" },
         { input: "I", action: "Identify playing song" },
         { input: "M", action: "Mute or unmute" },
@@ -270,7 +299,9 @@ Item {
     panel.visible = true
     fetchError = ""
     loadState()
-    if (payload.action === "random") {
+    if (payload.action === "stop") {
+      stopPlayer()
+    } else if (payload.action === "random") {
       if (worldStations.length === 0) showWorld()
       tuneRandom()
     } else if (payload.action === "tocador") {
@@ -278,8 +309,10 @@ Item {
       showAlbums("tocador")
     } else if (payload.action === "albums") {
       showAlbums(payload.source || "library")
-    } else if (payload.action === "tv") {
-      showCatalog("tv")
+    } else if (payload.action === "tv" || payload.action === "iptv") {
+      showCatalog("iptv")
+    } else if (payload.action === "youtube") {
+      showCatalog("youtube")
     } else if (worldStations.length === 0) showWorld()
     scheduleWorldExpansion(800)
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -295,6 +328,7 @@ Item {
     panel.visible = false
     worldExpandTimer.stop()
     if (worldExpandProcess.running) worldExpandProcess.running = false
+    if (embeddedVideoActive || embeddedRelayProcess.running) stopEmbeddedVideo()
   }
 
   function dismiss() {
@@ -376,9 +410,27 @@ Item {
   }
 
   function setStationList(nextMode, stations) {
+    viewportFilterReady = false
+    viewportStationUuids = []
     mode = nextMode
     if (nextMode !== "favorites" && nextMode !== "recent") results = stations
     setSelection(stations.length > 0 ? 0 : -1)
+  }
+
+  function applyViewportFilter(stationUuids) {
+    if (albumMode || catalog === "youtube" || (mode !== "world" && mode !== "country"))
+      return
+    viewportStationUuids = Array.isArray(stationUuids) ? stationUuids.slice(0) : []
+    viewportFilterReady = true
+    var currentUuid = selectedStation ? String(selectedStation.uuid || "") : ""
+    var index = currentUuid ? RadioModel.indexByUuid(displayStations, currentUuid) : -1
+    if (index >= 0) {
+      setSelection(index)
+    } else {
+      selectedIndex = -1
+      selectedStation = null
+      stationList.currentIndex = -1
+    }
   }
 
   function scheduleWorldExpansion(delay) {
@@ -391,6 +443,7 @@ Item {
   function cancelPendingFetch() {
     pendingFetchAction = ""
     pendingFetchValue = ""
+    pendingFetchCatalog = ""
   }
 
   function cancelPendingPlay() {
@@ -406,9 +459,11 @@ Item {
         cancelPendingFetch()
         return
       }
-      if (pendingFetchAction === action && pendingFetchValue === nextValue) return
+      if (pendingFetchAction === action && pendingFetchValue === nextValue
+          && pendingFetchCatalog === catalog) return
       pendingFetchAction = action
       pendingFetchValue = nextValue
+      pendingFetchCatalog = catalog
       fetching = true
       return
     }
@@ -420,11 +475,13 @@ Item {
     fetchOutput = ""
     fetchStderr = ""
     var path = tvCatalog ? tvFetchPath : fetchPath
-    fetchProcess.command = nextValue ? [path, action, nextValue] : [path, action]
+    fetchProcess.command = tvCatalog ? [path, action, nextValue, catalog]
+      : (nextValue ? [path, action, nextValue] : [path, action])
     fetchProcess.running = true
   }
 
   function showWorld(refresh) {
+    if (embeddedVideoActive || embeddedRelayProcess.running) stopEmbeddedVideo()
     searchDebounce.stop()
     cancelPendingFetch()
     searchField.text = ""
@@ -436,7 +493,8 @@ Item {
   }
 
   function showCatalog(name) {
-    var next = name === "tv" ? "tv" : "radio"
+    var next = name === "youtube" ? "youtube"
+      : ((name === "tv" || name === "iptv") ? "iptv" : "radio")
     if (next !== catalog) {
       var worlds = Object.assign({}, catalogWorlds)
       worlds[catalog] = worldStations
@@ -452,6 +510,7 @@ Item {
   }
 
   function showFavorites() {
+    if (embeddedVideoActive || embeddedRelayProcess.running) stopEmbeddedVideo()
     searchDebounce.stop()
     cancelPendingFetch()
     searchField.text = ""
@@ -463,6 +522,7 @@ Item {
   }
 
   function showAlbums(source, refresh) {
+    if (embeddedVideoActive || embeddedRelayProcess.running) stopEmbeddedVideo()
     searchDebounce.stop()
     cancelPendingFetch()
     searchField.text = ""
@@ -498,6 +558,7 @@ Item {
   }
 
   function showRecent() {
+    if (embeddedVideoActive || embeddedRelayProcess.running) stopEmbeddedVideo()
     searchDebounce.stop()
     cancelPendingFetch()
     searchField.text = ""
@@ -633,6 +694,17 @@ Item {
 
   function playStation(station, scope, stations) {
     if (!station) return
+    if (station.kind === "tv" && station.provider === "iptv-org") {
+      playEmbeddedVideo(station, stations)
+      return
+    }
+    if (embeddedVideoActive || embeddedRelayProcess.running) {
+      pendingPlayStation = station
+      pendingPlayScope = scope
+      pendingPlayStations = Array.isArray(stations) ? stations.slice(0) : []
+      stopEmbeddedVideo()
+      return
+    }
     if (playerActionBusy) {
       pendingPlayStation = station
       pendingPlayScope = scope
@@ -669,6 +741,10 @@ Item {
   }
 
   function playerAction(action) {
+    if (embeddedVideoActive) {
+      embeddedPlayerAction(action)
+      return
+    }
     if (playerActionBusy) return
     playerError = ""
     playerActionProcess.action = action
@@ -679,6 +755,13 @@ Item {
   }
 
   function stopPlayer() {
+    if (embeddedVideoActive || pendingEmbeddedStation || embeddedRelayProcess.running) {
+      cancelPendingPlay()
+      pendingEmbeddedStation = null
+      pendingEmbeddedQueue = []
+      stopEmbeddedVideo()
+      return
+    }
     cancelPendingPlay()
     if (stopProcess.running || playCancellationRequested) return
     if (playerActionProcess.running && !playPreparing) return
@@ -690,6 +773,7 @@ Item {
 
   function applyPlayerState(raw) {
     try {
+      if (typeof embeddedVideoActive !== "undefined" && embeddedVideoActive) return
       if (typeof raw !== "string" || raw.length > 65536)
         throw new Error("Player status is too large")
       var state = JSON.parse(raw || "{}")
@@ -742,7 +826,166 @@ Item {
     pendingVolume = Math.max(0, Math.min(100, Math.round(value)))
     playerVolume = pendingVolume
     playerError = ""
+    if (embeddedVideoActive) {
+      embeddedAudio.volume = pendingVolume / 100
+      reportedVolume = pendingVolume
+      pendingVolume = -1
+      return
+    }
     volumeTimer.restart()
+  }
+
+  function playEmbeddedVideo(station, stations) {
+    var rows = RadioModel.stationWindow(Array.isArray(stations) ? stations : [], station.uuid, 500)
+      .filter(function(row) { return row && row.kind === "tv" && row.provider === "iptv-org" })
+    if (rows.length === 0) rows = [station]
+    pendingEmbeddedStation = station
+    pendingEmbeddedQueue = rows
+    if (embeddedVideoActive) {
+      restartEmbeddedVideo()
+      return
+    }
+    embeddedStopProcess.command = [playerPath, "stop"]
+    embeddedStopProcess.running = true
+  }
+
+  function beginEmbeddedVideo() {
+    if (embeddedRelayProcess.running) return
+    var station = pendingEmbeddedStation
+    var rows = pendingEmbeddedQueue
+    pendingEmbeddedStation = null
+    pendingEmbeddedQueue = []
+    if (!station) return
+    embeddedQueue = rows
+    embeddedIndex = RadioModel.indexByUuid(rows, station.uuid)
+    if (embeddedIndex < 0) embeddedIndex = 0
+    embeddedStation = station
+    playingStation = station
+    playingStationUuid = String(station.uuid || "")
+    playerTitle = String(station.name || "")
+    playerRunning = true
+    playerPaused = false
+    playerMuted = embeddedAudio.muted
+    playlistPosition = embeddedIndex
+    playlistCount = rows.length
+    streamError = ""
+    playerError = ""
+    embeddedAudio.volume = playerVolume / 100
+    embeddedMedia.stop()
+    embeddedMedia.source = ""
+    embeddedRelayProcess.stationUuid = playingStationUuid
+    embeddedRelayProcess.sourceReady = false
+    var relayCommand = [videoRelayPath, "--url", String(station.url || "")]
+    var userAgent = String(station.userAgent || "")
+    var referrer = String(station.referrer || "")
+    if (userAgent) relayCommand.push("--user-agent", userAgent)
+    if (referrer) relayCommand.push("--referer", referrer)
+    embeddedRelayProcess.command = relayCommand
+    embeddedRelayProcess.running = true
+    highlightStationCountry(station, true)
+    if (playingStationUuid && playingStationUuid !== recordedStationUuid) {
+      recordedStationUuid = playingStationUuid
+      recordPlayed(playingStationUuid)
+    }
+  }
+
+  function restartEmbeddedVideo() {
+    embeddedMedia.stop()
+    embeddedMedia.source = ""
+    if (embeddedRelayProcess.running) embeddedRelayProcess.running = false
+    else beginEmbeddedVideo()
+  }
+
+  function applyEmbeddedRelayOutput(raw) {
+    if (!embeddedVideoActive || embeddedRelayProcess.sourceReady
+        || embeddedRelayProcess.stationUuid !== playingStationUuid) return
+    if (typeof raw !== "string" || raw.length > 4096) {
+      streamError = "IPTV relay returned invalid data"
+      embeddedRelayProcess.running = false
+      return
+    }
+    var line = raw.split("\n")[0].trim()
+    if (!line) return
+    try {
+      var result = JSON.parse(line)
+      var relayUrl = String(result.url || "")
+      if (!/^http:\/\/127\.0\.0\.1:[0-9]{1,5}\/stream$/.test(relayUrl))
+        throw new Error("invalid relay URL")
+      embeddedRelayProcess.sourceReady = true
+      embeddedMedia.source = relayUrl
+      embeddedMedia.play()
+    } catch (error) {
+      streamError = "IPTV relay could not be started"
+      embeddedRelayProcess.running = false
+    }
+  }
+
+  function stopEmbeddedVideo() {
+    pendingEmbeddedStation = null
+    pendingEmbeddedQueue = []
+    embeddedStation = null
+    embeddedQueue = []
+    embeddedIndex = -1
+    embeddedMedia.stop()
+    embeddedMedia.source = ""
+    if (embeddedRelayProcess.running) embeddedRelayProcess.running = false
+    playerRunning = false
+    playerPaused = false
+    playerMuted = false
+    playerTitle = ""
+    streamError = ""
+    playingStation = null
+    playingStationUuid = ""
+    playlistPosition = -1
+    playlistCount = 0
+    recordedStationUuid = ""
+  }
+
+  function removeBrokenChannel() {
+    var station = embeddedStation
+    if (!station || removeChannelProcess.running) return
+    removeChannelProcess.uuid = String(station.uuid || "")
+    removeChannelProcess.command = [tvHealthPath, "remove", removeChannelProcess.uuid,
+      String(station.name || "")]
+    removeChannelProcess.running = true
+  }
+
+  function dropRemovedChannel(uuid) {
+    function keep(row) { return !row || String(row.uuid || "") !== uuid }
+    worldStations = worldStations.filter(keep)
+    results = results.filter(keep)
+    var worlds = Object.assign({}, catalogWorlds)
+    for (var key in worlds)
+      if (Array.isArray(worlds[key])) worlds[key] = worlds[key].filter(keep)
+    catalogWorlds = worlds
+
+    var queue = embeddedQueue.filter(keep)
+    if (!embeddedVideoActive || String(embeddedStation.uuid || "") !== uuid) return
+    if (queue.length === 0) {
+      stopEmbeddedVideo()
+      return
+    }
+    pendingEmbeddedStation = queue[Math.min(embeddedIndex, queue.length - 1)]
+    pendingEmbeddedQueue = queue
+    restartEmbeddedVideo()
+  }
+
+  function embeddedPlayerAction(action) {
+    if (!embeddedVideoActive) return
+    if (action === "toggle") {
+      if (embeddedMedia.playbackState === MediaPlayer.PlayingState) embeddedMedia.pause()
+      else embeddedMedia.play()
+    } else if (action === "mute") {
+      embeddedAudio.muted = !embeddedAudio.muted
+      playerMuted = embeddedAudio.muted
+    } else if (action === "next" || action === "previous") {
+      if (embeddedQueue.length === 0) return
+      var delta = action === "next" ? 1 : -1
+      var index = (embeddedIndex + delta + embeddedQueue.length) % embeddedQueue.length
+      pendingEmbeddedStation = embeddedQueue[index]
+      pendingEmbeddedQueue = embeddedQueue
+      restartEmbeddedVideo()
+    }
   }
 
   function changePlayerVolume(delta) {
@@ -902,10 +1145,75 @@ Item {
     if (mode === "albums") return albumError || (albumProcess.running
       ? "Loading " + albumSourceTitle + "…" : "No albums found in this connector.")
     if (mode === "search") return universalSearchProcess.running
-      ? "Searching Radio, TV, Tocador, and My Music…"
+      ? "Searching Radio, IPTV, YouTube, Tocador, and My Music…"
       : "Nothing matches “" + String(searchField.text || "").trim() + "”."
     if (mode === "country") return "No working " + stationNoun + " found in " + (activeCountryName || "this country") + "."
     return "No working " + stationNoun + " found."
+  }
+
+  AudioOutput {
+    id: embeddedAudio
+    volume: root.playerVolume / 100
+  }
+
+  MediaPlayer {
+    id: embeddedMedia
+    audioOutput: embeddedAudio
+    videoOutput: embeddedVideoOutput
+
+    onPlaybackStateChanged: {
+      if (!root.embeddedVideoActive) return
+      root.playerRunning = true
+      root.playerPaused = playbackState === MediaPlayer.PausedState
+    }
+    onMediaStatusChanged: {
+      if (root.embeddedVideoActive && mediaStatus === MediaPlayer.EndOfMedia)
+        root.embeddedPlayerAction("next")
+    }
+    onErrorOccurred: function(error, message) {
+      if (!root.embeddedVideoActive) return
+      root.streamError = String(message || "IPTV stream could not be played")
+        .replace(/[\r\n\t]+/g, " ").slice(0, 200)
+      root.playerPaused = true
+    }
+  }
+
+  Process {
+    id: removeChannelProcess
+    property string uuid: ""
+    command: []
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.streamError = "Could not remove this channel"
+      else root.dropRemovedChannel(uuid)
+    }
+  }
+
+  Process {
+    id: embeddedStopProcess
+    command: []
+    onExited: root.beginEmbeddedVideo()
+  }
+
+  Process {
+    id: embeddedRelayProcess
+    property string stationUuid: ""
+    property bool sourceReady: false
+    command: []
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(line) { root.applyEmbeddedRelayOutput(line) }
+    }
+    onExited: function(exitCode) {
+      sourceReady = false
+      if (root.pendingEmbeddedStation) {
+        root.beginEmbeddedVideo()
+      } else if (root.pendingPlayStation) {
+        root.playPendingStation()
+      } else if (root.embeddedVideoActive) {
+        root.streamError = "IPTV relay stopped unexpectedly"
+        root.playerPaused = true
+      }
+    }
   }
 
   FileView {
@@ -1017,10 +1325,10 @@ Item {
         }
       }
       var sameCatalog = root.fetchCatalog === root.catalog
-      // TV's world is a complete snapshot; replacing it drops ended YouTube lives.
+      // Video connectors are complete snapshots; replacement drops ended live streams.
       var nextWorld = null
       if (root.fetchAction === "world" && stations !== null)
-        nextWorld = root.fetchCatalog === "tv" ? stations.slice(0, root.worldStationLimit)
+        nextWorld = root.fetchCatalog !== "radio" ? stations.slice(0, root.worldStationLimit)
           : RadioModel.mergeStations(sameCatalog ? root.worldStations
             : root.catalogWorlds[root.fetchCatalog], stations, root.worldStationLimit)
       if (nextWorld !== null && !sameCatalog) {
@@ -1035,11 +1343,13 @@ Item {
       if (root.pendingFetchAction) {
         var nextAction = root.pendingFetchAction
         var nextValue = root.pendingFetchValue
+        var nextCatalog = root.pendingFetchCatalog
         root.pendingFetchAction = ""
         root.pendingFetchValue = ""
+        root.pendingFetchCatalog = ""
         root.fetching = false
         Qt.callLater(function() {
-          if (root.mode === nextAction)
+          if (root.mode === nextAction && root.catalog === nextCatalog)
             root.startFetch(nextAction,
               nextAction === "random" ? root.randomExclusions() : nextValue)
         })
@@ -1051,7 +1361,7 @@ Item {
       if (root.fetchAction === "search"
           && String(searchField.text || "").trim() !== root.fetchValue) return
       if (exitCode !== 0) {
-        var service = root.tvCatalog ? "The TV channel list" : "Radio Browser"
+        var service = root.catalogServiceName
         root.fetchError = root.displayStations.length > 0
           ? "Showing cached " + root.stationNoun + " · " + service + " is unavailable"
           : service + " is unavailable. Try again shortly."
@@ -1527,8 +1837,12 @@ Item {
         } else if (event.key === Qt.Key_M) {
           root.playerAction("mute")
           event.accepted = true
+        } else if (event.key === Qt.Key_Escape && root.embeddedVideoActive) {
+          root.stopEmbeddedVideo()
+          event.accepted = true
         } else if (event.key === Qt.Key_T) {
-          root.showCatalog(root.tvCatalog ? "radio" : "tv")
+          root.showCatalog(root.catalog === "radio" ? "iptv"
+            : (root.catalog === "iptv" ? "youtube" : "radio"))
           event.accepted = true
         } else if (event.key === Qt.Key_I) {
           root.identifySong()
@@ -1696,6 +2010,7 @@ Item {
             id: globe
             anchors.fill: parent
             anchors.margins: Style.spacing.lg
+            visible: !root.embeddedVideoActive
             countries: root.countries
             stations: root.currentGeoStations
             selectedStation: root.playingStation || root.selectedStation
@@ -1714,12 +2029,102 @@ Item {
               keyCatcher.forceActiveFocus()
             }
             onPointerMoved: root.keyboardSelectionVisible = false
+            onViewportChanged: function(stationUuids) { root.applyViewportFilter(stationUuids) }
             onStationActivated: function(station) { root.activateMapStation(station) }
-            onCountryActivated: function(code, name) { root.browseCountry(code, name) }
+            onCountryActivated: function(code, name) {
+              if (root.youtubeCatalog) {
+                root.fetchError = "YouTube live channels do not provide country metadata"
+                return
+              }
+              root.browseCountry(code, name)
+            }
+          }
+
+          Rectangle {
+            id: embeddedVideoStage
+            anchors.fill: parent
+            anchors.margins: Style.spacing.lg
+            visible: root.embeddedVideoActive
+            color: "black"
+            radius: Style.cornerRadius
+            clip: true
+
+            VideoOutput {
+              id: embeddedVideoOutput
+              anchors.fill: parent
+              fillMode: VideoOutput.PreserveAspectFit
+            }
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              height: Style.space(48)
+              color: Qt.rgba(0, 0, 0, 0.62)
+
+              Text {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.spacing.md
+                anchors.right: embeddedVideoCloseButton.left
+                anchors.rightMargin: Style.spacing.sm
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.playingStationName || "IPTV"
+                textFormat: Text.PlainText
+                color: "white"
+                font.family: Style.font.menuFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Button {
+                id: embeddedVideoCloseButton
+                anchors.right: parent.right
+                anchors.rightMargin: Style.spacing.sm
+                anchors.verticalCenter: parent.verticalCenter
+                iconText: "\uf00d"
+                tooltipText: "Close video and return to map (Esc)"
+                focusable: true
+                foreground: "white"
+                accent: root.accent
+                onClicked: {
+                  root.stopEmbeddedVideo()
+                  keyCatcher.forceActiveFocus()
+                }
+              }
+            }
+
+            Text {
+              id: embeddedStatusText
+              anchors.centerIn: parent
+              visible: !embeddedMedia.hasVideo
+              text: root.streamError || "OPENING IPTV STREAM…"
+              textFormat: Text.PlainText
+              color: root.streamError ? root.urgent : "white"
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Button {
+              id: removeChannelButton
+              anchors.horizontalCenter: parent.horizontalCenter
+              anchors.top: embeddedStatusText.bottom
+              anchors.topMargin: Style.spacing.md
+              visible: !embeddedMedia.hasVideo && root.streamError !== ""
+                && !removeChannelProcess.running
+              iconText: ""
+              text: "Not working? Remove this channel"
+              tooltipText: "Hide this channel from the list"
+              focusable: true
+              foreground: "white"
+              accent: root.accent
+              onClicked: root.removeBrokenChannel()
+            }
           }
 
           Text {
             id: mapHint
+            visible: !root.embeddedVideoActive
             anchors.left: parent.left
             anchors.leftMargin: Style.spacing.panelPadding
             anchors.right: signalCount.left
@@ -1740,11 +2145,14 @@ Item {
 
           Text {
             id: signalCount
+            visible: !root.embeddedVideoActive
             anchors.right: parent.right
             anchors.rightMargin: Style.spacing.panelPadding
             anchors.bottom: parent.bottom
             anchors.bottomMargin: Style.spacing.md
-            text: root.currentGeoStations.length + " signals"
+            text: root.viewportFilterActive
+              ? root.displayStations.length + " visible signals"
+              : root.currentGeoStations.length + " signals"
             textFormat: Text.PlainText
             color: root.dim
             font.family: Style.font.menuFamily
@@ -1816,14 +2224,24 @@ Item {
                 onClicked: root.showCatalog("radio")
               }
               Button {
-                text: "TV"
-                tooltipText: "Free live TV channels from iptv-org (T)"
+                text: "IPTV"
+                tooltipText: "Free live channels from iptv-org (T)"
                 selected: !root.albumMode && root.mode !== "favorites" && root.mode !== "recent"
-                  && root.tvCatalog
+                  && root.iptvCatalog
                 foreground: root.foreground
                 accent: root.accent
                 fontSize: Style.font.caption
-                onClicked: root.showCatalog("tv")
+                onClicked: root.showCatalog("iptv")
+              }
+              Button {
+                text: "YouTube"
+                tooltipText: "Live channels from your YouTube subscriptions (T)"
+                selected: !root.albumMode && root.mode !== "favorites" && root.mode !== "recent"
+                  && root.youtubeCatalog
+                foreground: root.foreground
+                accent: root.accent
+                fontSize: Style.font.caption
+                onClicked: root.showCatalog("youtube")
               }
               Button {
                 text: "Tocador"

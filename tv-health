@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Hide and restore IPTV channels selected by the user."""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+UUID_PATTERN = re.compile(r"^[0-9A-Fa-f-]{20,64}$")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas"
+removed_file = config_dir / "tv-removed.json"
+
+
+def read_removed():
+    try:
+        data = json.loads(removed_file.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_removed(data):
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile("w", dir=config_dir, prefix="tv-removed.json.", delete=False) as handle:
+        json.dump(data, handle, separators=(",", ":"))
+        temporary = handle.name
+    os.replace(temporary, removed_file)
+
+
+def update_removed(change):
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(config_dir / "tv-removed.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        removed = read_removed()
+        change(removed)
+        write_removed(removed)
+    return removed
+
+
+def remove(args):
+    if not UUID_PATTERN.fullmatch(args.uuid):
+        print("Invalid channel id", file=sys.stderr)
+        return 2
+    name = re.sub(r"\s+", " ", CONTROL.sub(" ", args.name or "")).strip()[:160]
+    update_removed(lambda removed: removed.__setitem__(args.uuid, {"name": name, "at": int(time.time())}))
+    return 0
+
+
+def restore(args):
+    if args.uuid != "all" and not UUID_PATTERN.fullmatch(args.uuid):
+        print("Invalid channel id", file=sys.stderr)
+        return 2
+    update_removed(lambda removed: removed.clear() if args.uuid == "all" else removed.pop(args.uuid, None))
+    return 0
+
+
+def listing(args):
+    removed = read_removed()
+    print(f"{len(removed)} channel(s) removed by you")
+    if args.verbose:
+        for uuid, entry in sorted(removed.items()):
+            name = entry.get("name", "?") if isinstance(entry, dict) else "?"
+            print(f"{uuid}  {name}")
+    return 0
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    remove_parser = commands.add_parser("remove", help="hide a channel until it is restored")
+    remove_parser.add_argument("uuid")
+    remove_parser.add_argument("name", nargs="?", default="")
+    remove_parser.set_defaults(run=remove)
+    restore_parser = commands.add_parser("restore", help="show a removed channel again, or 'all'")
+    restore_parser.add_argument("uuid")
+    restore_parser.set_defaults(run=restore)
+    status_parser = commands.add_parser("status", help="list channels you removed")
+    status_parser.add_argument("-v", "--verbose", action="store_true")
+    status_parser.set_defaults(run=listing)
+    args = parser.parse_args()
+    return args.run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

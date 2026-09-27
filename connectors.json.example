@@ -1,6 +1,12 @@
 {
   "connectors": [
     {
+      "id": "iptv",
+      "type": "iptv-org",
+      "name": "IPTV",
+      "enabled": true
+    },
+    {
       "id": "music",
       "type": "folder",
       "name": "My Music",

@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Expose one IPTV stream on localhost while fetching it through radio-session.
+
+Integration contract:
+  radio-video-relay --url URL [--user-agent UA] [--referer URL]
+
+The command prints one JSON object containing the localhost ``url`` and then
+serves it until SIGTERM. Each client connection gets a fresh upstream ffmpeg. The upstream is
+always launched through radio-session, which places it inside radio-sandbox
+and behind radio-proxy.  This process never accepts a remote bind address.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.server
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
+from urllib.parse import urlsplit
+
+
+MAX_URL = 2048
+MAX_HEADER = 512
+MAX_REFERER = 2048
+
+
+def validate_url(value: str) -> str:
+    if not isinstance(value, str) or len(value) > MAX_URL:
+        raise ValueError("stream URL is too long")
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+        raise ValueError("stream URL contains control characters")
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("stream URL must be HTTP(S) with a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("stream URL must not contain credentials")
+    if parsed.fragment:
+        raise ValueError("stream URL must not contain a fragment")
+    return value
+
+
+def validate_header(value: str, limit: int, name: str) -> str:
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError(f"{name} is too long")
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+        raise ValueError(f"{name} contains control characters")
+    return value
+
+
+def ffmpeg_command(session: str, url: str, user_agent: str, referer: str) -> list[str]:
+    command = [session, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
+    if user_agent:
+        command.extend(("-user_agent", user_agent))
+    if referer:
+        command.extend(("-referer", referer))
+    command.extend(("-i", url, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+                    "-f", "mpegts", "pipe:1"))
+    return command
+
+
+class RelayState:
+    def __init__(self, session: str, url: str, user_agent: str, referer: str):
+        self.command = ffmpeg_command(session, url, user_agent, referer)
+        self.process: subprocess.Popen[bytes] | None = None
+        self.lock = threading.Lock()
+        self.stopping = False
+
+    def start(self) -> subprocess.Popen[bytes]:
+        with self.lock:
+            if self.stopping:
+                raise RuntimeError("relay is stopping")
+            if self.process is not None and self.process.poll() is None:
+                return self.process
+            self.process = subprocess.Popen(
+                self.command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return self.process
+
+    def stop_stream(self) -> None:
+        with self.lock:
+            process = self.process
+            self.process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    def stop(self) -> None:
+        """Prevent future clients and terminate the active upstream."""
+        with self.lock:
+            self.stopping = True
+        self.stop_stream()
+
+
+class RelayServer(http.server.HTTPServer):
+    allow_reuse_address = False
+
+
+class RelayHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", "3")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if self.path == "/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+        self.send_error(404)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/healthz":
+            body = b"ok\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path != "/stream":
+            self.send_error(404)
+            return
+        try:
+            process = self.server.relay.start()  # type: ignore[attr-defined]
+            stream = process.stdout
+            if stream is None:
+                raise RuntimeError("ffmpeg has no output")
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.server.relay.stop_stream()  # type: ignore[attr-defined]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--user-agent", default="")
+    parser.add_argument("--referer", default="")
+    parser.add_argument("--session", default=str(Path(__file__).with_name("radio-session")))
+    parser.add_argument("--port", type=int, default=0)
+    args = parser.parse_args(argv)
+    args.url = validate_url(args.url)
+    args.user_agent = validate_header(args.user_agent, MAX_HEADER, "user-agent")
+    args.referer = validate_header(args.referer, MAX_REFERER, "referer")
+    if not 0 <= args.port <= 65535:
+        parser.error("port must be between 0 and 65535")
+    if not os.path.isfile(args.session) or not os.access(args.session, os.X_OK):
+        parser.error("radio-session is not executable")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    relay = RelayState(args.session, args.url, args.user_agent, args.referer)
+    server = RelayServer(("127.0.0.1", args.port), RelayHandler)
+    server.relay = relay  # type: ignore[attr-defined]
+    stopping = threading.Event()
+
+    def shutdown(_signum: int, _frame: object) -> None:
+        if stopping.is_set():
+            return
+        stopping.set()
+        relay.stop()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    print(json.dumps({
+        "url": f"http://127.0.0.1:{server.server_port}/stream",
+        "healthUrl": f"http://127.0.0.1:{server.server_port}/healthz",
+        "pid": os.getpid(),
+    }), flush=True)
+    try:
+        server.serve_forever(poll_interval=0.2)
+    finally:
+        relay.stop()
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

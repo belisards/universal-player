@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search radio, TV, Tocador archives, and configured music folders together."""
+"""Search radio, IPTV, YouTube, Tocador archives, and music folders together."""
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
@@ -75,11 +75,11 @@ def normalize(rows, source):
                 "title": row.get("name") or "Unknown station", "artist": "",
                 "album": "", "cover": row.get("favicon") or "",
             })
-        elif source == "tv":
-            row.update({"source": "tv", "title": row.get("name") or "Unknown channel",
+        elif source in ("iptv", "youtube"):
+            row.update({"source": source, "title": row.get("name") or "Unknown channel",
                         "artist": "", "album": "", "cover": row.get("favicon") or ""})
-        row["connectorLabel"] = "TV · YOUTUBE" if row.get("provider") == "youtube" else {
-            "radio": "RADIO", "tv": "TV", "library": "MY MUSIC",
+        row["connectorLabel"] = {
+            "radio": "RADIO", "iptv": "IPTV", "youtube": "YOUTUBE", "library": "MY MUSIC",
             "uqt": "TOCADOR · UQT", "homi": "TOCADOR · HOMINIS",
         }.get(row.get("source"), source.upper())
         output.append(row)
@@ -101,13 +101,14 @@ def main():
     tv_path = os.environ.get("TOCADOR_TV_PATH", str(directory / "tv-fetch"))
     commands = {
         "radio": [fetch_path, "search", query],
-        "tv": [tv_path, "search", query],
+        "iptv": [tv_path, "search", query, "iptv"],
+        "youtube": [tv_path, "search", query, "youtube"],
         "library": [library_path],
         "uqt": [archive_path, "uqt", str(MAX_ROWS_PER_SOURCE), query],
         "homi": [archive_path, "homi", str(MAX_ROWS_PER_SOURCE), query],
     }
     gathered = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(invoke, command): source
                    for source, command in commands.items()}
         for future in as_completed(futures):

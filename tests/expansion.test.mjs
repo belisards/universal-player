@@ -62,10 +62,12 @@ run.context.opened = false
 run.finish([{ uuid: "third" }])
 assert.equal(run.context.worldStations.length, 2)
 assert.equal(run.delays.length, 3)
-const tv = session()
-tv.context.catalog = "tv"
-tv.context.scheduleWorldExpansion(800)
-tv.finish([{ uuid: "radio" }])
-assert.equal(tv.delays.length, 0)
-assert.equal(tv.context.worldStations.length, 1)
+for (const catalog of ["iptv", "youtube"]) {
+  const video = session()
+  video.context.catalog = catalog
+  video.context.scheduleWorldExpansion(800)
+  video.finish([{ uuid: "channel" }])
+  assert.equal(video.delays.length, 0)
+  assert.equal(video.context.worldStations.length, 1)
+}
 console.log("World expansion tests passed")

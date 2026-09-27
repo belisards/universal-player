@@ -28,6 +28,12 @@ TestCase {
     signalName: "stationActivated"
   }
 
+  SignalSpy {
+    id: viewportChanges
+    target: globe
+    signalName: "viewportChanged"
+  }
+
   Component {
     id: countedGlobe
     Atlas.Globe {
@@ -68,6 +74,7 @@ TestCase {
     globe.accentColor = "#ff8a3d"
     selectionChanges.clear()
     activations.clear()
+    viewportChanges.clear()
   }
 
   function cleanup() {
@@ -150,6 +157,39 @@ TestCase {
     globe.centreLongitude = 180
     globe.paintSignals(context)
     compare(globe.stationUnderPointer(globe.width / 2, globe.height / 2).uuid, "back")
+  }
+
+  function test_viewportPublishesOnlySignalsVisibleOnScreen() {
+    globe.globeScale = 3
+    globe.stations = [
+      { uuid: "centre", latitude: 0, longitude: 0 },
+      { uuid: "offscreen", latitude: 0, longitude: 60 },
+      { uuid: "back", latitude: 0, longitude: 180 }
+    ]
+    var context = {
+      beginPath: function() {},
+      arc: function() {},
+      fill: function() {},
+      stroke: function() {}
+    }
+    globe.paintSignals(context)
+    globe.publishViewportStations()
+    compare(globe.viewportStationUuids.length, 1)
+    compare(globe.viewportStationUuids[0], "centre")
+    compare(viewportChanges.count, 1)
+
+    globe.centreLongitude = 180
+    globe.paintSignals(context)
+    globe.publishViewportStations()
+    compare(globe.viewportStationUuids.length, 1)
+    compare(globe.viewportStationUuids[0], "back")
+    verify(viewportChanges.count >= 2)
+
+    globe.centreLongitude = 0
+    globe.paintSignals(context)
+    globe.publishViewportStations()
+    compare(globe.viewportStationUuids.length, 1)
+    compare(globe.viewportStationUuids[0], "centre")
   }
 
   function test_markerColorsAreConvertedOncePerPaint() {

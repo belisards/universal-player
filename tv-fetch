@@ -30,6 +30,7 @@ cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "
 catalog_file = cache_dir / "tv.json"
 lock_file = cache_dir / "tv.lock"
 youtube_file = cache_dir / "youtube-live.json"
+removed_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "tv-removed.json"
 connectors_file = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "radio-atlas" / "connectors.json"
 version = json.loads((script_dir / "manifest.json").read_text()).get("version", "0")
 user_agent = f"UniversalPlayer/{version} (https://github.com/belisards/universal-player)"
@@ -224,6 +225,15 @@ def refresh_in_background():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+def hidden_uuids():
+    """Channels the user explicitly removed from normal catalog views."""
+    try:
+        data = json.loads(removed_file.read_text())
+    except (OSError, ValueError):
+        return set()
+    return set(data) if isinstance(data, dict) else set()
+
+
 def load_catalog():
     rows = read_catalog()
     if rows is None:
@@ -397,6 +407,10 @@ def main():
     os.umask(0o077)
     action = sys.argv[1] if len(sys.argv) > 1 else "world"
     value = sys.argv[2] if len(sys.argv) > 2 else ""
+    source = sys.argv[3] if len(sys.argv) > 3 else "all"
+
+    if source not in ("all", "iptv", "youtube"):
+        fail("Unknown video connector")
 
     if action == "refresh":
         refresh_catalog()
@@ -416,23 +430,29 @@ def main():
     if action not in ("world", "country", "search", "random", "resolve"):
         fail(f"Unknown action: {action}")
 
-    try:
-        rows = load_catalog()
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
-        fail(f"TV channel service is unavailable: {type(error).__name__}", 1)
+    rows = []
+    if source != "youtube":
+        try:
+            rows = load_catalog()
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            fail(f"IPTV channel service is unavailable: {type(error).__name__}", 1)
+        if action != "resolve":
+            hidden = hidden_uuids()
+            rows = [row for row in rows if row["uuid"] not in hidden]
+    live = youtube_live_rows() if source != "iptv" else []
 
     if action == "world":
-        live = youtube_live_rows()
         output = live + rows[:WORLD_ROWS - len(live)]
     elif action == "country":
-        output = country_rows(rows, value.upper())
+        output = [] if source == "youtube" else country_rows(rows, value.upper())
     elif action == "search":
-        output = search_rows(youtube_live_rows() + rows, value.strip())
+        output = search_rows(live + rows, value.strip())
     elif action == "random":
-        output = random_rows(rows, ids)
+        output = random_rows(live + rows, ids)
     else:
         wanted = set(ids)
-        output = [row for row in (cached_youtube_rows() or []) + rows if row["uuid"] in wanted]
+        youtube_rows = (cached_youtube_rows() or []) if source != "iptv" else []
+        output = [row for row in youtube_rows + rows if row["uuid"] in wanted]
     print(json.dumps(output, separators=(",", ":")))
 
 

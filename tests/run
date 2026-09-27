@@ -20,7 +20,7 @@ assert_no_match() {
 jq -e '
   .schemaVersion == 1
   and .id == "akshar.radio-atlas"
-  and .version == "0.2.0"
+  and .version == "0.3.0"
   and (.kinds | index("panel"))
   and (.kinds | index("bar-widget"))
   and .keepLoaded == true
@@ -30,11 +30,14 @@ bash -n "$project_dir/radio-fetch" "$project_dir/radio-player" \
   "$project_dir/radio-sandbox" "$project_dir/radio-session" "$project_dir/radio-state" \
   "$project_dir/radio-window" "$project_dir/radio-identify" \
   "$project_dir/tests/fixtures/"*
+python3 -m py_compile "$project_dir/tv-fetch" "$project_dir/tv-health" "$project_dir/radio-video-relay"
 luac -p "$project_dir/radio-status.lua"
 python3 "$project_dir/tests/library.test.py"
 python3 "$project_dir/tests/tocador.test.py"
 python3 "$project_dir/tests/search.test.py"
 python3 "$project_dir/tests/tv.test.py"
+python3 "$project_dir/tests/video_relay.test.py"
+python3 "$project_dir/tests/health.test.py"
 node "$project_dir/tests/model.test.mjs"
 node "$project_dir/tests/expansion.test.mjs"
 node "$project_dir/tests/selection.test.mjs"
@@ -47,6 +50,20 @@ assert_no_match 'playerStatusProcess|refreshPlayerStatus' \
   "$project_dir/BarWidget.qml" "$project_dir/RadioAtlas.qml"
 rg -q 'maximumScale: 24' "$project_dir/Globe.qml"
 rg -q 'searchDebounce.restart()' "$project_dir/RadioAtlas.qml"
+rg -Fq 'import QtMultimedia' "$project_dir/RadioAtlas.qml"
+rg -Fq 'id: embeddedVideoOutput' "$project_dir/RadioAtlas.qml"
+rg -Fq 'id: embeddedRelayProcess' "$project_dir/RadioAtlas.qml"
+rg -Fq 'radio-video-relay' "$project_dir/RadioAtlas.qml"
+assert_no_match 'embeddedMedia.source = String\(station.url' "$project_dir/RadioAtlas.qml"
+rg -Fq 'command = [session, "ffmpeg"' "$project_dir/radio-video-relay"
+rg -Fq 'id: embeddedVideoCloseButton' "$project_dir/RadioAtlas.qml"
+rg -Fq 'Close video and return to map' "$project_dir/RadioAtlas.qml"
+rg -Fq 'onViewportChanged:' "$project_dir/RadioAtlas.qml"
+rg -Fq 'signal viewportChanged(var stationUuids)' "$project_dir/Globe.qml"
+rg -Fq 'station.provider === "iptv-org"' "$project_dir/RadioAtlas.qml"
+rg -Fq 'text: "IPTV"' "$project_dir/RadioAtlas.qml"
+rg -Fq 'text: "YouTube"' "$project_dir/RadioAtlas.qml"
+rg -Fq 'restartEmbeddedVideo()' "$project_dir/RadioAtlas.qml"
 rg -q 'property bool helpVisible: false' "$project_dir/RadioAtlas.qml"
 sed -n '/function toggleControls/,/^  }/p' "$project_dir/RadioAtlas.qml" \
   | rg -Fq 'helpVisible = !helpVisible'
@@ -61,7 +78,7 @@ rg -q 'worldStationLimit: 5000' "$project_dir/RadioAtlas.qml"
 rg -q 'id: worldExpandTimer' "$project_dir/RadioAtlas.qml"
 rg -q 'id: worldExpandProcess' "$project_dir/RadioAtlas.qml"
 assert_no_match 'enabled: !root.fetching' "$project_dir/RadioAtlas.qml"
-rg -Fq 'mergeGeoStations(worldStations, displayStations, countries)' "$project_dir/RadioAtlas.qml"
+rg -Fq 'mergeGeoStations(worldStations, unfilteredDisplayStations, countries)' "$project_dir/RadioAtlas.qml"
 rg -Fq 'if (mode === "world") return "world"' "$project_dir/RadioAtlas.qml"
 sed -n '/function activateMapStation/,/^  }/p' "$project_dir/RadioAtlas.qml" \
   | rg -q 'worldStations'

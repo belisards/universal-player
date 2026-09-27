@@ -47,11 +47,13 @@ Item {
   property var preparedCountries: []
   property var preparedGrid: []
   property var preparedStations: []
+  property var viewportStationUuids: []
 
   signal stationActivated(var station)
   signal countryActivated(string code, string name)
   signal interactionStarted()
   signal pointerMoved()
+  signal viewportChanged(var stationUuids)
 
   Accessible.name: "Interactive world radio globe"
   Accessible.description: "Drag or flick to rotate, use the mouse wheel to zoom, and select a station signal or country"
@@ -439,6 +441,37 @@ Item {
       }
     }
     ctx.globalAlpha = 1
+    scheduleViewportUpdate()
+  }
+
+  function collectViewportStationUuids() {
+    var output = []
+    for (var i = 0; i < preparedStations.length; i++) {
+      var row = preparedStations[i]
+      if (row.visible && row.station && row.station.uuid !== undefined)
+        output.push(String(row.station.uuid))
+    }
+    return output
+  }
+
+  function publishViewportStations() {
+    var next = collectViewportStationUuids()
+    if (next.length === viewportStationUuids.length) {
+      var unchanged = true
+      for (var i = 0; i < next.length; i++) {
+        if (next[i] !== viewportStationUuids[i]) {
+          unchanged = false
+          break
+        }
+      }
+      if (unchanged) return
+    }
+    viewportStationUuids = next
+    viewportChanged(next)
+  }
+
+  function scheduleViewportUpdate() {
+    if (!viewportUpdateTimer.running) viewportUpdateTimer.start()
   }
 
   function paintGlobe(ctx) {
@@ -572,6 +605,13 @@ Item {
       var ctx = getContext("2d")
       if (ctx) root.paintGlobe(ctx)
     }
+  }
+
+  Timer {
+    id: viewportUpdateTimer
+    interval: 80
+    repeat: false
+    onTriggered: root.publishViewportStations()
   }
 
   Component.onCompleted: {

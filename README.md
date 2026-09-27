@@ -3,12 +3,12 @@
 > One Omarchy media player for world radio, embedded IPTV, YouTube, independent music archives,
 > and your own albums.
 
-Every source shares one window, one search box, one Random button, and one `mpv`
-queue that shows up in Omarchy's media controls:
+Every source shares one window, one search box, one Random button, and one
+transport control surface. Audio queues also appear in Omarchy's media controls:
 
 - **Radio**: about 50,000 stations from Radio Browser on a rotatable globe
 - **IPTV**: about 10,000 free channels from iptv-org, rendered inside the globe canvas
-- **YouTube**: live channels from your subscriptions, kept separate from IPTV
+- **YouTube**: live channels from your subscriptions, kept separate from IPTV (audio playback for now)
 - **Tocador**: the [UQT and Hominis Canidae](https://tocador.cc/) archives as one album catalog
 - **My Music**: any local or synced music folder, such as a Nextcloud library
 
@@ -41,7 +41,7 @@ Quickshell UI components, so it needs Omarchy and won't run on a plain Hyprland 
 
 ## More features
 
-- Kinetic drag rotation that highlights a nearby station when it settles, plus deep wheel zoom on a theme-aware globe
+- Kinetic drag rotation that highlights a nearby station when it settles, deep wheel zoom, and a sidebar that follows the signals visible on the globe
 - A fast cached world view that progressively adds thousands of stations and keeps the session catalog when closed
 - Country browsing, with country-level map estimates for stations without coordinates
 - Automatic country focus for the station that is actually playing
@@ -59,7 +59,7 @@ omarchy plugin add https://github.com/belisards/universal-player.git --enable
 ```
 
 Universal Player uses `bubblewrap`, `curl`, `ffmpeg`, `ffprobe`, `iproute2`, `jq`, `mpv`, `python`,
-`socat`, `coreutils`, and `util-linux`. These packages ship with Omarchy.
+`qt6-multimedia`, `socat`, `coreutils`, and `util-linux`. These packages ship with Omarchy.
 `mpv-mpris` connects playback to `omarchy.media` and is also part of the
 standard Omarchy installation.
 
@@ -89,6 +89,9 @@ publish a country, so their signals sit on country estimates.
 IPTV uses QtMultimedia to render directly inside the main globe canvas. The
 sidebar, queue, volume, pause, previous, next, and stop controls stay in the
 same window; IPTV does not open a second video window.
+
+If a community channel is broken, use **Not working? Remove this channel** in
+the video error overlay. Restore every channel later with `./tv-health restore all`.
 
 ### Live YouTube subscriptions
 
@@ -245,7 +248,8 @@ click-count endpoint. Favorites and history stay in
 
 IPTV channel data comes from iptv-org's public API on GitHub Pages; no playback
 or search data is sent back to it. Station metadata and stream URLs are community supplied. Labels are rendered
-as plain text. Playback runs in an isolated network namespace and reaches
+as plain text. Embedded video reads only from a loopback relay; its upstream ffmpeg runs in the
+same isolated network namespace as audio playback and reaches
 stations through a bounded proxy that rejects private and effectively local
 destinations, including after redirects. Remote metadata and local JSON are
 size- and record-limited before they reach the shell. Universal Player still connects

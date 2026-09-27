@@ -84,6 +84,15 @@ class TvCatalogTest(unittest.TestCase):
             cache = Path(temporary) / "omarchy-radio-atlas"
             cache.mkdir()
             (cache / "tv.json").write_text(json.dumps(rows))
+            live_id = "UC" + "a" * 22
+            youtube_row = tv_fetch.youtube_live_channels(
+                {"entry": guide_entry(live_id, "Gil Live", True)})[0]
+            (cache / "youtube-live.json").write_text(json.dumps([youtube_row]))
+            config = Path(temporary) / "radio-atlas"
+            config.mkdir()
+            (config / "connectors.json").write_text(json.dumps({"connectors": [{
+                "type": "youtube-subscriptions", "auth": "~/unused-auth.json", "enabled": True
+            }]}))
             environment = {**os.environ, "XDG_CACHE_HOME": temporary, "PATH": "/nonexistent",
                            "XDG_CONFIG_HOME": temporary}
 
@@ -92,10 +101,16 @@ class TvCatalogTest(unittest.TestCase):
                                         env=environment, capture_output=True, text=True)
                 return result.returncode, json.loads(result.stdout) if result.returncode == 0 else None
 
-            self.assertEqual(len(run("world")[1]), 2)
+            self.assertEqual(len(run("world")[1]), 3)
+            self.assertEqual(len(run("world", "", "iptv")[1]), 2)
+            self.assertEqual([row["name"] for row in run("world", "", "youtube")[1]], ["Gil Live"])
             self.assertEqual([row["name"] for row in run("country", "uk")[1]], ["Bbc"])
+            self.assertEqual(run("country", "uk", "youtube")[1], [])
             self.assertEqual([row["name"] for row in run("search", "glo")[1]], ["Globo"])
+            self.assertEqual(run("search", "glo", "youtube")[1], [])
+            self.assertEqual([row["name"] for row in run("search", "gil", "youtube")[1]], ["Gil Live"])
             self.assertEqual(run("resolve", tv_fetch.station_uuid("Bbc.uk"))[1][0]["name"], "Bbc")
+            self.assertEqual(run("world", "", "unknown")[0], 2)
             self.assertEqual(run("world-more")[1], [])
             self.assertEqual(run("country", "1")[0], 2)
             self.assertEqual(run("resolve", "not-an-id")[0], 2)
